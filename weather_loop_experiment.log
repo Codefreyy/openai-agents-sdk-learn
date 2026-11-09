@@ -1,0 +1,23 @@
+
+=== baseline ===
+final_output: scripted final answer
+tool_output: Tokyo: sunny, 14-20C
+model_calls: 2 tool_invocations: ["Tokyo"]
+second_input: [{'content': 'Tokyo weather?', 'role': 'user'}, {'arguments': '{"city":"Tokyo"}', 'call_id': 'call_1', 'name': 'get_weather', 'type': 'function_call', 'id': 'call_1'}, {'call_id': 'call_1', 'output': 'Tokyo: sunny, 14-20C', 'type': 'function_call_output'}]
+
+=== tool exception ===
+final_output: scripted final answer
+tool_output: An error occurred while running the tool. Please try again.
+model_calls: 2 tool_invocations: ["Tokyo"]
+second_input: [{'content': 'Tokyo weather?', 'role': 'user'}, {'arguments': '{"city":"Tokyo"}', 'call_id': 'call_1', 'name': 'get_weather', 'type': 'function_call', 'id': 'call_1'}, {'call_id': 'call_1', 'output': 'An error occurred while running the tool. Please try again.', 'type': 'function_call_output'}]
+
+=== invalid parameter ===
+final_output: scripted final answer
+tool_output: An error occurred while running the tool. Please try again.
+model_calls: 2 tool_invocations: []
+second_input: [{'content': 'Tokyo weather?', 'role': 'user'}, {'arguments': '{"city":123}', 'call_id': 'call_1', 'name': 'get_weather', 'type': 'function_call', 'id': 'call_1'}, {'call_id': 'call_1', 'output': 'An error occurred while running the tool. Please try again.', 'type': 'function_call_output'}]
+
+=== repeat until max_turns ===
+exception: MaxTurnsExceeded Max turns (2) exceeded
+model_calls: 2 tool_invocations: ["Tokyo", "Tokyo"]
+second_input: [{'content': 'Tokyo weather?', 'role': 'user'}, {'arguments': '{"city":"Tokyo"}', 'call_id': 'call_1', 'name': 'get_weather', 'type': 'function_call', 'id': 'call_1'}, {'call_id': 'call_1', 'output': 'Tokyo: sunny, 14-20C', 'type': 'function_call_output'}]

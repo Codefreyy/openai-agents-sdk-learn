@@ -1,0 +1,22 @@
+NOTEBOOK_SUCCESS 15 6
+CELL 1 openai-agents: 0.24.0
+SDK 加载路径: /root/codex-workspaces/openai-agents-sdk-study-17d994bd/src/agents/__init__.py
+
+CELL 3 
+CELL 4 模拟模型调用次数: 2
+本地工具执行记录: ['Tokyo']
+第二次模型的输入: [{'content': '东京天气怎么样？', 'role': 'user'}, {'arguments': '{"city":"Tokyo"}', 'call_id': 'call_1', 'name': 'get_weather', 'type': 'function_call', 'id': 'call_1'}, {'call_id': 'call_1', 'output': 'Tokyo: sunny, 14-20C', 'type': 'function_call_output'}]
+最终输出: 预设的最终回答
+
+CELL 7 工具函数执行记录: []
+SDK 返回的工具输出: ['An error occurred while running the tool. Please try again.']
+第二次模型的输入: [{'content': '东京天气怎么样？', 'role': 'user'}, {'arguments': '{"city":123}', 'call_id': 'call_1', 'name': 'get_weather', 'type': 'function_call', 'id': 'call_1'}, {'call_id': 'call_1', 'output': 'An error occurred while running the tool. Please try again.', 'type': 'function_call_output'}]
+
+CELL 10 异常: MaxTurnsExceeded Max turns (2) exceeded
+模拟模型调用次数: 2
+工具执行次数: 2
+
+CELL 13 交接请求名: transfer_to_specialist
+交接事件: ['triage -> specialist']
+最终 Agent: specialist
+
