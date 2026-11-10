@@ -122,9 +122,9 @@ agents配置
     - history = [B]
 ``` 
 
-### 3、核心机制：Agent Loop
+### 3、核心机制
 
-1) While True
+#### 1）Agent Loop：While True
 
 ```mermaid
 flowchart TD
@@ -202,7 +202,7 @@ next step有4个类型，循环看next_step的类型来分发
 - NextStepInterruption：
 
 
-2) 单轮执行：模型调用+工具分发
+##### 单轮执行：模型调用+工具分发
 
 ```python
 # 伪代码：省略复杂参数、Hooks、Guardrails 等
@@ -292,7 +292,7 @@ class SingleStepResult:
 
 ** recap: 单轮执行负责完成一次模型交互及其本地处理，runner负责整个任务的生命周期。两者通过 SingleStepResult.next_step 解耦。
 
-3) Model Provider * Responses API
+##### Model Provider * Responses API
 
 Agent 配置中的 model="gpt-4.1" 只是一个字符串，Runner 如何找到具体 Model，并最终发起 Responses API 请求？
 
@@ -419,6 +419,7 @@ def get_model(agent, run_config):
     - 可以将自定义 Model 实现直接配置给 Agent，而不一定依赖 OpenAI 的默认 Provider
 
 
+
 Model Provider具体做什么？
 openai-agents-python/src/agents/models/openai_provider.py:244
 ```python
@@ -446,8 +447,220 @@ def get_model(self, model_name):
     )
 ```
 
-
 为什么需要 Model Provider？ 如何支持 Responses API、Chat Completions 和第三方模型，同时让 Runner 不依赖具体 API？
+
+
+获取模型实例之后，sdk是怎么真正调用reposnes api的？
+
+```mermaid
+flowchart TD
+    A["get_new_response()"]
+    B["get_response_with_retry()"]
+    C["执行 get_response 回调"]
+    D["model.get_response()"]
+    E["OpenAIResponsesModel.get_response()"]
+    F["self._fetch_response()"]
+    G["_build_response_create_kwargs()"]
+    H["client.responses.create()"]
+    I["原始 Response"]
+    J["转换成 ModelResponse"]
+    K["返回 get_new_response()"]
+
+    A --> B --> C --> D --> E
+    E --> F --> G --> H
+    H --> I --> J --> K
+
+```
+get_new_response() 先通过 get_model() 获取 Model 实例，再通过 get_response_with_retry() 包装调用。实际的 model.get_response() 根据 Model 对象的运行时类型分派到对应适配器；默认情况下执行 OpenAIResponsesModel.get_response()，由其 _fetch_response() 构造参数并调用 client.responses.create()，最后返回统一的 ModelResponse。
+
+这条链路分成三层：
+
+Runner 模型调用层：get_new_response()，负责组织模型调用、Hooks、重试和使用量统计。
+
+Model 适配层：OpenAIResponsesModel.get_response()，负责将 SDK 调用转换为底层 API 调用。
+
+Responses API 层：client.responses.create()，真正发送请求。
+
+2）第一步：get_new_response() 发起模型调用
+
+源码：src/agents/run_internal/run_loop.py:2907
+
+new_response = await get_response_with_retry(
+    get_response=lambda: model.get_response(
+        system_instructions=filtered.instructions,
+        input=filtered.input,
+        model_settings=model_settings,
+        tools=all_tools,
+        output_schema=output_schema,
+        handoffs=handoffs,
+        # ...省略部分参数
+    ),
+    # ...重试及超时配置
+)
+
+为什么不是直接调用 model.get_response()？
+
+因为 SDK 统一通过 get_response_with_retry() 处理模型请求。
+
+这里使用 lambda 把真正的模型调用包装成回调，交给重试函数执行。
+
+注意：正常调用并不意味着一定发生重试。 请求成功时只执行一次；发生符合条件的错误时才可能重试。
+
+3）第二步：get_response_with_retry() 执行回调
+
+源码：src/agents/run_internal/model_retry.py:543
+
+核心执行位置：src/agents/run_internal/model_retry.py:580
+
+关键源码
+response = await _await_model_attempt(
+    get_response(), timeout
+)
+
+这里的 get_response() 并不是 Model 接口中的方法，而是上一步传进来的 lambda 回调。
+
+因此执行关系是：
+
+get_new_response() 传入
+get_response = lambda: model.get_response(...)
+
+get_response_with_retry() 执行
+get_response()
+
+实际产生的调用
+model.get_response(...)
+
+_await_model_attempt() 负责等待本次请求完成，并处理超时等问题。
+
+这里的重试循环与 Agent Loop 是两回事。
+
+Agent Loop：一次模型响应处理完后，决定是否进入下一轮模型调用。
+
+Retry Loop：当前逻辑模型调用失败后，决定是否重新尝试。
+
+Retry 不会独立消耗新的 Agent Turn。
+
+4）第三步：model.get_response() 为什么进入 OpenAIResponsesModel？
+
+这里涉及 Python 的多态。
+
+虽然 model 的静态类型是 Model，但是默认情况下，运行时的实际对象是：
+
+model = OpenAIResponsesModel(...)
+
+所以调用：
+
+await model.get_response(...)
+
+实际上执行的是：
+
+src/agents/models/openai_responses.py:543
+
+即：
+
+OpenAIResponsesModel.get_response()
+
+这也解释了为什么在 VS Code 中使用 Go to Definition，有时会跳到 interface.py：IDE 根据静态类型导航到抽象接口，但 Python 运行时会执行具体子类的方法。
+
+5）第四步：get_response() 调用 _fetch_response()
+
+源码：src/agents/models/openai_responses.py:563
+
+核心逻辑：
+
+response = await self._fetch_response(
+    system_instructions,
+    input,
+    model_settings,
+    tools,
+    output_schema,
+    handoffs,
+    previous_response_id=previous_response_id,
+    conversation_id=conversation_id,
+    stream=False,
+    prompt=prompt,
+)
+
+这里将真正发送 API 请求的工作交给 _fetch_response()。
+
+实际函数定义在：
+
+src/agents/models/openai_responses.py:803
+
+注意，前面还有两个 @overload 声明，用于区分流式和非流式返回类型；它们不是实际执行的函数体。
+
+6）第五步：构造请求并调用 Responses API
+
+源码：src/agents/models/openai_responses.py:816–830
+
+核心逻辑：
+
+# 1. 构建 Responses API 请求参数
+create_kwargs = self._build_response_create_kwargs(
+    # instructions、input、tools 等参数
+)
+
+# 2. 获取 OpenAI Client
+client = self._get_client()
+
+# 3. 非流式调用
+if not stream:
+    response = await client.responses.create(
+        **create_kwargs
+    )
+
+其中 _build_response_create_kwargs() 负责将 SDK 内部配置转换成 Responses API 所需的参数，例如：
+
+模型名称、Instructions、Input。
+
+Tools 和 Handoffs 对应的工具声明。
+
+Model Settings、Output Schema。
+
+previous_response_id、conversation_id 等上下文参数。
+
+client.responses.create() 才是最终真正发出 API 请求的地方。
+
+7）第六步：将 Response 转成 ModelResponse
+
+源码：src/agents/models/openai_responses.py:620
+
+精简结构：
+
+return ModelResponse(
+    output=response.output,
+    usage=usage,
+    response_id=response.id,
+    request_id=getattr(response, "_request_id", None),
+)
+
+这里涉及两种不同的响应对象：
+
+对象
+
+含义
+
+Response
+
+OpenAI Responses API 返回的原始响应
+
+ModelResponse
+
+Agents SDK 的统一模型响应结构
+
+转换完成后，结果沿调用链返回：
+
+OpenAIResponsesModel.get_response()
+    ↓
+get_response_with_retry()
+    ↓
+get_new_response()
+    ↓
+run_single_turn()
+    ↓
+process_model_response()
+
+至此，模型调用结束，SDK 进入模型响应解析和工具执行阶段。
 
 ### 4、design tradeoffs
 1、Runner.run(agent, input) vs agent.run(input)
