@@ -1,67 +1,80 @@
-# 从一次模型调用到 Agent Runtime：深入 OpenAI Agents SDK Python 核心源码
+# 深入 OpenAI Agents SDK：从一次模型调用到 Agent Runtime
 
-> **研究目标：** 理解 OpenAI Agents SDK 的架构设计与核心执行机制，重点研究模型、工具和执行器如何协作，以及 Agent 如何继续执行、切换 Agent、暂停和结束任务。
+> **研究目标：** 理解 OpenAI Agents SDK（Python）的核心架构与执行机制，重点关注模型、工具和执行器如何协作，以及 Agent 如何继续执行、切换 Agent 和结束任务。
 >
 > **研究方法：** 问题 → 结构 → 调用链 → 设计取舍 → 实验验证 → 应用。
 >
-> 本文围绕 Python SDK 的非流式执行主链路展开。源码片段中会区分实际源码和为了理解而编写的精简伪代码。
+> **源码仓库：** [openai/openai-agents-python](https://github.com/openai/openai-agents-python)
+>
+> 本文主要研究非流式执行路径。代码包含源码片段与教学伪代码；伪代码用于突出核心机制，不代表可以直接替换 SDK 内部实现。
 
----
+# 第一章：为什么需要 Agents SDK？整体架构是什么？
 
-# 一、为什么需要 Agents SDK？
+## 1.1 从普通 LLM 调用到 Agent
 
-假设现在需要开发一个 AI 助手。
+假设我们现在要开发一个 AI 助手，用户问：
 
-用户问：
+> 明天上海适合户外运动吗？
 
-> 明天上海适合户外跑步吗？
-
-如果只是普通的 LLM 应用，我们很可能直接把问题发送给模型：
+对于一个普通的 LLM 应用，处理方式可能非常简单：
 
 ```text
 Prompt → LLM → Answer
 ```
 
-但很快就会遇到一个问题：
+但是，这里存在一个问题：
 
-**模型怎么知道上海明天的真实天气？**
+**模型怎么知道明天上海的真实天气？**
 
-即使模型能够回答，它也不一定掌握实时天气数据。
+即使模型拥有大量知识，它也不一定掌握实时天气信息。
 
-为了给出可靠的建议，我们需要让模型先查询天气，再根据结果判断。
+为了可靠地回答这个问题，我们可能需要先查询天气，再根据查询结果判断是否适合户外运动。
 
-于是，执行流程变成：
+执行过程就变成：
 
 ```text
-用户：明天上海适合跑步吗？
+用户：明天上海适合户外运动吗？
     ↓
-模型：需要查询上海明天的天气
+模型：我需要先查询天气
     ↓
 调用天气 API
     ↓
 返回天气数据：台风预警
     ↓
-模型根据天气结果判断
+模型根据天气信息判断
     ↓
-回答：不建议户外跑步
+回答：不建议户外运动
 ```
 
-模型不再只是生成文本，而是参与了一个多步骤的任务。
+可以看到，这已经不再是简单的一问一答。
 
-如果任务再复杂一点，比如根据用户的运动习惯、居住位置、天气和附近场所制定计划，系统可能还需要读取 Memory、查询多个工具，甚至将任务交给其他 Agent。
+模型需要先决定做什么，然后利用外部工具获取信息，最后结合结果生成答案。
 
-可以用一个概念性公式理解：
+如果任务再复杂一些呢？
+
+比如用户希望系统结合自己的运动习惯、居住位置、明天天气和附近的运动场所，推荐一套锻炼计划。
+
+这时系统可能需要：
+
+- 查询天气、地图等多个外部工具。
+- 读取用户的 Memory 或其他上下文。
+- 根据工具结果决定是否继续调用工具。
+- 将任务交给擅长不同领域的 Agent。
+- 判断什么时候任务已经完成。
+
+我们可以用一个简化公式来理解 Agent：
 
 **Agent ≈ LLM + Tools + Context / Memory + Execution Logic**
 
-这里的 Memory 是可选能力，不是每个 Agent 都必须有持久记忆。
+这里的 Memory 是可选能力，并不是每个 Agent 都必须有持久化记忆。
 
-## 1.1 真正复杂的是执行过程
+那么问题来了：
 
-我们完全可以直接使用 Responses API，自己实现一个 Agent：
+**谁来管理这些模型调用、工具执行以及多步骤任务的推进过程？**
+
+其实，我们完全可以基于 Responses API 自己编写执行循环：
 
 ```python
-# 教学伪代码
 
 while True:
     response = await call_model()
@@ -73,47 +86,42 @@ while True:
         return response.final_output
 ```
 
-看起来不复杂。
+看起来并不复杂。
 
-但真实业务中还会遇到：
+模型需要工具，我们就执行工具；模型不再请求工具，我们就返回答案。
 
-- 模型一次请求多个工具怎么办？
-- 工具参数错误或执行失败怎么办？
-- 模型一直请求工具，无法结束怎么办？
-- 模型想切换另一个 Agent，谁来管理控制权？
-- 任务需要人工审批，怎么暂停和恢复？
-- 多轮模型调用的上下文、状态与用量由谁管理？
+但是实际业务中，很快会遇到更多问题：
 
-这些都是 Agent 应用普遍面临的问题。
+如果模型一次调用三个工具呢？如果工具执行失败呢？如果模型一直调用工具，陷入无限循环呢？如果模型想把任务交给另一个 Agent 呢？
 
-**OpenAI Agents SDK 就是为这类问题提供通用运行机制的框架。**
+这些问题都需要一套统一的运行机制来处理。
 
-主要能力包括：
+### Agents SDK 解决什么问题？
 
-- 将 Agent 配置转成模型请求。
-- 识别并处理模型产生的 Function Tool Call。
-- 执行工具，将结果反馈给模型。
-- 管理 Agent Loop。
-- 支持多 Agent Handoff。
-- 提供 Guardrails、Session、Tracing 等能力。
+OpenAI Agents SDK 提供了构建 Agent 应用所需的通用运行能力，包括：
 
-可以类比 Vue / React。
+1. 将 Agent 配置转换为模型请求。
+2. 处理模型返回的 Function Tool Call。
+3. 执行工具，并将执行结果交给模型。
+4. 管理 Agent Loop，决定是否继续调用模型。
+5. 支持 Handoff，在不同 Agent 之间交接控制权。
+6. 提供 Guardrails、Session、Tracing 等辅助能力。
 
-即使没有前端框架，我们也能直接使用 JavaScript 开发应用；但框架可以封装通用的运行机制。
+可以把它类比为前端开发中的 Vue 或 React。
 
-同理，Agents SDK 并非构建 Agent 的必要条件。开发者完全可以自己基于 Responses API 实现执行循环。
+即使没有框架，我们也能直接使用 JavaScript 开发 Web 应用；但框架提供了一套可复用的运行机制，减少重复开发。
 
-**Takeaway：Agents SDK 提供的是可复用的 Agent Runtime，而不是具体业务能力。**
+同样，**Agents SDK 并不是构建 Agent 应用的必要条件，它只是帮助开发者复用已有的 Agent Runtime 能力。**
 
-那么，OpenAI 是怎样组织这套 Runtime 的？
+具体的业务规则、工具实现和外部数据，仍然需要开发者提供。
 
----
+**Takeaway：Agents SDK 解决的不是模型推理能力问题，而是如何组织模型调用、工具执行与任务生命周期的问题。**
 
-# 二、整体架构：Agent 和 Runner 为什么分开？
+既然它是一套运行框架，那么 OpenAI 是怎么组织它的？
 
-先看整体架构。
+## 1.2 OpenAI Agents SDK 的整体架构
 
-## 2.1 SDK 核心架构图
+先看整体架构图。
 
 ```mermaid
 flowchart TB
@@ -184,18 +192,18 @@ flowchart TB
     style EXECUTION fill:#f0fdf4,stroke:#86efac
 ```
 
-这是概念架构图，不是严格的函数调用顺序。
+这张图表达的是 SDK 的模块关系，而不是严格的函数调用顺序。Tools、Handoffs 和 Guardrails 也属于 Agent 可以配置的能力，这里为了突出运行职责，将它们单独展示。
 
-可以先认识四个核心抽象：
+其中最值得关注的是四个核心抽象：
 
-| 抽象 | 核心职责 |
+| 抽象 | 职责 |
 |---|---|
-| Agent | 配置对象，声明名称、指令、模型和工具等 |
-| Runner | 执行 Agent Loop，管理运行状态和控制流 |
-| Tool | Agent 能调用的外部能力 |
-| Handoff | 将执行任务的控制权转交给另一个 Agent |
+| Agent | 配置对象，描述名称、Instructions、Tools、Model 等 |
+| Runner | 执行 Agent Loop，管理运行状态与控制流 |
+| Tool | Agent 可以调用的外部能力 |
+| Handoff | 将执行控制权转交给其他 Agent |
 
-## 2.2 看一个最小示例
+我们先看一个最简单的 Agent。
 
 ```python
 from dataclasses import dataclass
@@ -217,8 +225,8 @@ def get_weather(city: str) -> Weather:
     )
 
 agent = Agent(
-    name="Hello world",
-    instructions="You are a helpful agent.",
+    name="Weather Assistant",
+    instructions="You are a helpful weather assistant.",
     tools=[get_weather],
     model="gpt-4.1",
     handoffs=[],
@@ -232,9 +240,8 @@ result = await Runner.run(
 print(result.final_output)
 ```
 
-天气数据为模拟数据。
 
-注意这两个对象：
+现在先看两个对象：
 
 ```python
 agent = Agent(...)
@@ -244,17 +251,15 @@ agent = Agent(...)
 result = await Runner.run(agent, input)
 ```
 
-为什么不是直接：
+你可能会产生一个疑问：
 
-```python
-result = await agent.run(input)
-```
+**为什么 OpenAI 将 Agent 和 Runner 分成两个对象，而不是直接调用 `agent.run()`？**
 
-而是需要一个独立的 Runner？
+## 1.3 Agent 和 Runner 为什么分离？
 
-## 2.3 配置和执行分离
+先看 Agent。
 
-Agent 主要负责声明能力：
+它主要是一个配置对象：
 
 ```text
 Agent
@@ -268,47 +273,63 @@ Agent
 └── guardrails
 ```
 
+它主要定义：
+
+“我是谁？使用什么模型？具备什么工具？遵循什么规则？”
+
 Runner 则负责真正执行这些配置。
 
-例如，同一个天气助手可以服务不同用户：
+它需要管理模型调用、工具执行、上下文、运行轮次以及最终结果。
+
+这样做的一个直接好处是：**可以复用 Agent 配置，而每次执行分别管理运行状态。**
+
+例如，有两个用户都使用同一个天气助手：
 
 ```text
-           Weather Agent 配置
-                  │
-          ┌───────┴───────┐
-          ▼               ▼
-        Run A           Run B
-    用户 A 的输入      用户 B 的输入
-    独立执行状态       独立执行状态
+                 Weather Agent
+                   共享配置
+                      │
+              ┌───────┴───────┐
+              ▼               ▼
+            Run A           Run B
+        history = [A]    history = [B]
+        独立运行状态      独立运行状态
 ```
 
-这里复用的是 Agent 配置，每次 Run 维护各自的执行状态。
+两个用户可以共享相同的 Instructions、Model 和 Tools。
 
-但要注意：
+但每次运行的输入、生成项和状态由各自的 Run 管理。
 
-**Agent 和 Runner 不分开，也可以实现复用。**
+当然，这并不意味着 Agent 和 Runner 不分开就无法复用。
 
-分离的主要价值是明确职责边界，使能力声明与执行逻辑解耦。
+分离的核心价值是**职责解耦**：Agent 主要描述能力，Runner 负责运行控制。
 
-此外，Agent 对象并非严格不可变；如果开发者主动共享 Session、Context 或其他可变对象，仍然需要处理状态隔离。
+而且，Agent 对象并非天然不可变。如果开发者主动共享 Session、可变 Context 或带状态的工具，仍需自行管理状态隔离。
 
-**Takeaway：Agent 定义“能做什么”，Runner 决定“怎么运行”。**
+**本章 Takeaway**
 
-那么 Runner 收到请求以后做了什么？
+> Agent 主要负责能力声明，Runner 负责执行过程。将二者分离，使 Agent 配置复用与运行状态管理具有更清晰的职责边界。
+
+接下来，我们真正进入 Runner 的内部，看看它是如何推进任务的。
 
 ---
 
-# 三、Agent Loop：Runner 如何推进任务？
+# 第二章：Runner 如何执行 Agent？深入 Agent Loop
 
-现在回到：
+现在回到最开始的代码：
 
 ```python
-result = await Runner.run(agent, input)
+result = await Runner.run(
+    agent,
+    "明天上海适合跑步吗？"
+)
 ```
 
-顺着调用链往下看。
+当这行代码开始执行，SDK 内部到底发生了什么？
 
-## 3.1 从 Runner.run() 到 _run_impl()
+## 2.1 从 Runner.run() 开始追踪
+
+我们先沿着调用链往下看。
 
 ```mermaid
 flowchart TD
@@ -325,7 +346,15 @@ flowchart TD
     H -->|中断| J[返回中断状态，后续可恢复]
 ```
 
-核心调用链：
+关键源码：
+
+- [src/agents/run.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run.py)
+openai-agents-python/src/agents/run.py:279
+
+- [src/agents/run_internal/run_loop.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/run_loop.py)
+
+
+可以看到，核心调用关系是：
 
 ```text
 Runner.run()
@@ -337,20 +366,16 @@ AgentRunner._run_impl()
 run_single_turn()
 ```
 
-源码：
+其中最值得研究的是 `_run_impl()`。
 
-`src/agents/run.py`
+因为这个函数负责整个 Agent 的执行循环。
 
-`src/agents/run_internal/run_loop.py`
+### `_run_impl()` 的核心骨架
 
-最值得研究的是 `_run_impl()`，因为它负责整个 Agent 的执行循环。
-
-## 3.2 _run_impl()：一个 while True
-
-从源码提炼的核心骨架：
+我们将复杂的真实源码精简成下面这段伪代码：
 
 ```python
-# 教学伪代码，省略 Session、Hooks、Guardrails 等细节
+# 伪代码：省略 Guardrails、Session、Hooks 等细节
 
 async def simplified_run(starting_agent, input, max_turns=10):
     current_agent = starting_agent
@@ -364,14 +389,14 @@ async def simplified_run(starting_agent, input, max_turns=10):
         if max_turns is not None and current_turn > max_turns:
             raise MaxTurnsExceeded()
 
-        # 1. 执行一次模型交互及本地处理
+        # 1. 执行一轮模型交互及本地处理
         turn_result = await run_single_turn(
             agent=current_agent,
             original_input=original_input,
             generated_items=generated_items,
         )
 
-        # 2. 更新本轮产生的消息与工具结果
+        # 2. 更新输入历史与生成项
         # Handoff 可能过滤或改写输入历史
         original_input = turn_result.original_input
         generated_items = (
@@ -383,7 +408,7 @@ async def simplified_run(starting_agent, input, max_turns=10):
         next_step = turn_result.next_step
 
         if isinstance(next_step, NextStepFinalOutput):
-            # 完成 Guardrails、Hooks、持久化等
+            # 还需要完成输出校验、Hooks、持久化等
             return await finalize_result(turn_result)
 
         elif isinstance(next_step, NextStepHandoff):
@@ -391,57 +416,80 @@ async def simplified_run(starting_agent, input, max_turns=10):
             continue
 
         elif isinstance(next_step, NextStepInterruption):
-            # 保存状态，等待审批后恢复
+            # 保存执行现场，等待审批后恢复
             return build_interruption_result(turn_result)
 
         elif isinstance(next_step, NextStepRunAgain):
             continue
 ```
 
-这里的 `finalize_result()` 和 `build_interruption_result()` 是为了表达职责而抽象出的教学函数，不是源码中的精确调用。
+注意：`finalize_result()` 和 `build_interruption_result()` 是伪代码中的辅助抽象，并不代表真实 SDK 存在完全同名的方法。运行历史的实际维护也比这里复杂。
 
-这段代码可以归纳为：
+这段代码最核心的部分，就是：
 
-**执行一轮 → 获取执行结果 → 判断下一步 → 继续或结束。**
+```python
+while True:
+    ...
+```
 
-为什么要有循环？
+为什么需要一个循环？
 
-因为模型可能需要执行多个步骤：
+因为 Agent 一次模型调用不一定就能完成任务。
+
+例如：
 
 ```text
-第 1 轮：模型查询天气
+第 1 轮：模型决定查询天气
     ↓
 执行 get_weather
     ↓
-第 2 轮：模型发现还需要场地信息
+第 2 轮：模型读取天气结果
+    ↓
+发现还需要查询运动场所
     ↓
 执行 search_places
     ↓
 第 3 轮：模型生成最终建议
 ```
 
-## 3.3 NextStep：把下一步动作表示成类型
+Runner 需要不断执行一轮模型交互，再根据结果决定是否继续。
 
-注意：
+**因此，Agent Loop 本质上就是 Agent 的执行控制器。**
+
+不过，还有一个问题：
+
+Runner 怎么知道什么时候应该继续，什么时候应该结束？
+
+## 2.2 NextStep：Runner 如何决定下一步？
+
+仔细看这行代码：
 
 ```python
 next_step = turn_result.next_step
 ```
 
-Runner 不需要直接分析模型原始输出，只需要根据 Single Turn 的执行结果决定下一步。
+Runner 并没有直接分析模型的原始响应。
 
-主要有四种 NextStep：
+它只读取单轮执行产生的 `next_step`，再根据类型决定后续操作。
 
-| 类型 | 含义 |
-|---|---|
-| `NextStepRunAgain` | 当前 Agent 需要再次调用模型 |
-| `NextStepHandoff` | 切换 Agent 后继续 |
-| `NextStepFinalOutput` | 已产生候选最终输出，进入收尾阶段 |
-| `NextStepInterruption` | 暂停执行，保留恢复状态 |
+SDK 主要定义了四种状态：
 
-为什么使用这些类型，而不是多个布尔变量？
+| NextStep | 含义 | Runner 行为 |
+|---|---|---|
+| `NextStepRunAgain` | 需要再次调用模型 | 使用当前 Agent 进入下一轮 |
+| `NextStepHandoff` | 需要交接给其他 Agent | 更新 `current_agent` 后继续 |
+| `NextStepFinalOutput` | 已产生候选最终输出 | 完成收尾并返回结果 |
+| `NextStepInterruption` | 当前执行需要暂停 | 保存状态，等待后续恢复 |
 
-假设：
+源码：
+
+[src/agents/run_internal/run_steps.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/run_steps.py)
+openai-agents-python/src/agents/run_internal/run_steps.py:163
+
+
+### 为什么要设计 NextStep，而不是直接使用布尔值？
+
+假设我们使用多个标志：
 
 ```python
 should_continue = True
@@ -449,29 +497,43 @@ should_handoff = False
 should_finish = True
 ```
 
-多个布尔值可能出现互相矛盾的组合。
+这种设计可能产生互相矛盾的状态。
 
-使用不同类型可以更明确地表达控制流。
+例如既要继续执行，又表示已经结束。
 
-这是一种状态机设计。
+而 `NextStepFinalOutput`、`NextStepHandoff` 等类型可以更加明确地表达控制流结果。
 
-注意：
+这实际上是一种**状态机设计**：把下一步操作编码成数据，再由外层 Runner 统一处理。
 
-`NextStepFinalOutput` 不代表任务之前从未执行工具。
+### NextStepFinalOutput 一定意味着模型没调用工具吗？
 
-模型可能在前面的轮次已经调用过工具，最后才返回答案。
+不一定。
 
-而 `NextStepHandoff` 会更新：
+模型可能已经在前面的轮次调用过多个工具，然后才生成最终答案。
+
+另外，某些 `tool_use_behavior` 配置允许直接使用工具输出作为最终结果。
+
+因此 `NextStepFinalOutput` 的含义是：
+
+**已经产生符合结束条件的候选结果，而不是整个任务从未执行过工具。**
+
+### NextStepHandoff 又有什么不同？
+
+如果模型决定将任务交给另外一个 Agent，Runner 需要更新：
 
 ```python
 current_agent = next_step.new_agent
 ```
 
-让下一轮使用新的 Agent 配置。
+随后进入下一轮。
 
-## 3.4 max_turns 限制什么？
+这意味着下一次模型调用使用的是新 Agent 的 Instructions、Tools、Model 等配置。
 
-看这一段：
+它不是简单地重新运行同一个 Agent。
+
+### max_turns 如何防止无限循环？
+
+再看：
 
 ```python
 current_turn += 1
@@ -480,7 +542,9 @@ if max_turns is not None and current_turn > max_turns:
     raise MaxTurnsExceeded()
 ```
 
-这里的 Turn 主要指一次逻辑模型调用及其响应处理。
+`max_turns` 用来限制 Agent 的模型调用轮次。
+
+这里需要区分：
 
 **Turn 不等于 Tool Call。**
 
@@ -496,28 +560,46 @@ if max_turns is not None and current_turn > max_turns:
     └── Final Output
 ```
 
-虽然执行了三个工具，但是只有两个模型轮次。
+虽然执行了三个工具，但这里只有两个模型轮次。
 
-同一次逻辑模型请求内部发生的重试，也不会单独增加 Turn。
+另外，同一次逻辑模型请求内部发生的重试，也不会独立消耗新的 Turn。
 
-**Takeaway：Runner 本质上是一个运行控制器，通过 Agent Loop 和 NextStep 状态机推进任务。**
+所以 Agent Loop 的循环和请求失败后的 Retry Loop，并不是同一种循环。
 
-现在我们已经知道 Runner 如何控制整个任务。
+**到这里，我们已经知道 Runner 何时继续、切换、暂停和结束。**
 
-但它调用的 `run_single_turn()` 到底做了什么？
-
----
-
-# 四、Single Turn：一次模型交互是如何完成的？
-
-`run_single_turn()` 负责完成当前轮次的模型交互及本地处理。
-
-可以从源码中提炼出三个阶段。
-
-## 4.1 单轮执行的核心伪代码
+但是代码中还有一个重要函数没有展开：
 
 ```python
-# 教学伪代码：省略复杂参数、Hooks、Guardrails 等
+run_single_turn()
+```
+
+它到底负责什么？
+
+## 2.3 Single Turn：一次模型交互内部发生了什么？
+
+`run_single_turn()` 可以理解为 Agent Loop 的一个执行单元。
+
+它负责完成当前轮次的模型调用及其本地处理，然后把下一步决策交还给 Runner。
+
+从核心源码中，可以提炼出三个阶段。
+
+### 第一阶段：调用模型
+
+准备 Instructions、Tools、Handoffs、Model Settings 等配置，然后调用模型。
+
+### 第二阶段：解析模型响应
+
+识别模型返回的是普通文本、Function Tool Call，还是 Handoff 等操作。
+
+### 第三阶段：执行并决定下一步
+
+执行本地工具、处理 Handoff 和必要的副作用，最终生成 `SingleStepResult`。
+
+核心伪代码：
+
+```python
+# 伪代码：省略复杂参数、Hooks、Guardrails 等
 
 async def run_single_turn(agent, input, context):
 
@@ -554,7 +636,7 @@ async def run_single_turn(agent, input, context):
     )
 ```
 
-对应流程图：
+对应执行流程：
 
 ```mermaid
 flowchart TD
@@ -571,9 +653,9 @@ flowchart TD
     E -->|"携带 next_step"| F["Runner：决定下一步"]
 ```
 
-为什么把模型响应解析和工具执行分开？
+为什么要把响应解析和工具执行分开？
 
-假设模型同时返回：
+假设一次模型响应包含：
 
 ```json
 [
@@ -602,31 +684,33 @@ flowchart TD
 ]
 ```
 
-这是教学示例，并不代表模型每次调用工具时都会同时返回文本消息。
+这是模型输出结构的教学示例，不代表每次工具调用都会同时返回文本消息。
 
-解析阶段负责识别：
+解析阶段先识别：
 
 - 两个 Function Tool Call。
-- 工具名称、参数和 Call ID。
-- 模型生成的消息。
+- 工具名称、Call ID 和参数。
+- 一个模型消息。
 
-执行阶段负责处理：
+执行阶段再负责：
 
 - 工具参数校验。
-- 工具执行和结果收集。
+- 工具执行与结果收集。
 - Handoff。
-- 审批、异常及其他副作用。
-- 下一步控制流决策。
+- 审批、异常及副作用处理。
+- 下一步决策。
 
-**这意味着 SDK 将“模型想做什么”和“如何执行”拆成了两个阶段。**
+**这种分层将“模型提出了什么操作”与“SDK 如何执行操作”分开。**
 
-## 4.2 SingleStepResult 返回什么？
+### SingleStepResult 返回什么？
+
+单轮执行完成后，返回 `SingleStepResult`。
 
 源码：
 
-`src/agents/run_internal/run_steps.py` → `SingleStepResult`
+[src/agents/run_internal/run_steps.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/run_steps.py)
 
-精简结构：
+精简数据结构：
 
 ```python
 @dataclass
@@ -648,322 +732,161 @@ class SingleStepResult:
     tool_output_guardrail_results: list
 ```
 
-这里仅保留关键字段。
+这不是完整的数据类定义，仅用于突出主要字段。
 
-重点是：
+其中最重要的是：
 
-`new_step_items`：记录本轮产生的消息、工具调用和工具结果等。
+- `new_step_items`：记录本轮产生的消息、工具调用与执行结果。
+- `next_step`：告诉 Runner 下一步应该做什么。
 
-`next_step`：告诉 Runner 下一步应该继续、切换、结束还是中断。
-
-因此可以理解为：
+我们可以把它理解为：
 
 **SingleStepResult = 本轮执行产物 + 下一步控制指令。**
 
-到这里，Runner 和 Single Turn 的职责已经比较清楚。
+这就明确了 Runner 和 Single Turn 的职责边界：
 
-不过，我们刚才跳过了一个关键过程：
+**Runner 负责整个任务的生命周期，Single Turn 负责完成一轮模型交互及本地处理。**
+
+**本章 Takeaway**
+
+> Agent Loop 是一个运行控制状态机。Runner 反复执行 Single Turn，并根据 `SingleStepResult.next_step` 决定继续、切换 Agent、结束或暂停。
+
+到这里，Runner 的工作原理已经清楚了。
+
+但我们在 Single Turn 里面跳过了一个重要环节：
 
 ```python
 response = await get_new_response(...)
 ```
 
-这个函数究竟是怎么调用模型的？
+这个函数究竟如何调用大模型？
 
 ---
 
-# 五、模型是怎么被调用的？从字符串到 Responses API
+# 第三章：Agent 如何调用模型，又如何理解模型响应？
 
-先不考虑复杂的 Provider 设计。
+现在我们已经知道：
 
-我们只追踪一个最普通的例子：
-
-```python
-agent = Agent(
-    name="Weather Agent",
-    model="gpt-4.1"
-)
-```
-
-这里的 `"gpt-4.1"` 只是一个字符串。
-
-现在 `Runner.run()` 已经执行到：
-
-```python
+```text
+Runner
+  ↓
+Agent Loop
+  ↓
+run_single_turn()
+  ↓
 get_new_response()
 ```
 
-接下来 SDK 必须完成两件事：
+接下来研究一个完整问题：
 
-**第一，找到对应的模型实现。**
+**SDK 如何从 Agent 中的模型配置，找到对应的大模型、发起请求，再理解模型返回的内容？**
 
-**第二，使用这个模型实现发起 API 请求。**
+这个过程可以分成三步：
 
-这就是整个模型调用模块的主线。
+1. 找到模型实例。
+2. 通过模型实例发起 API 请求。
+3. 解析模型返回的响应。
 
-## 5.1 先看完整调用链
+## 3.1 从模型名称到 Model 实例
 
-```mermaid
-flowchart TD
-    A["Runner.run()"]
-    B["AgentRunner.run()"]
-    C["AgentRunner._run_impl()"]
-    D["run_single_turn()"]
-    E["get_new_response()"]
-    F["get_model()"]
-    G["MultiProvider.get_model()"]
-    H["OpenAIProvider.get_model()"]
-    I["OpenAIResponsesModel 实例"]
-    J["model.get_response()"]
-    K["client.responses.create()"]
-
-    A --> B --> C --> D --> E
-    E --> F --> G --> H --> I
-    I -.->|"返回 Model 实例"| E
-    E --> J --> K
-
-    style H fill:#fef3c7,stroke:#d97706,color:#92400e
-    style K fill:#dcfce7,stroke:#16a34a,color:#166534
-```
-
-这张图展示默认无前缀模型名称、Responses HTTP 模式下的典型路径。
-
-模型对象已经由应用提供时，可以跳过 Provider 解析。
-
-## 5.2 第一步：get_model() 找到模型实例
-
-在 `get_new_response()` 中：
-
-```python
-model = get_model(execution_agent, run_config)
-```
-
-源码：
-
-`src/agents/run_internal/turn_preparation.py` → `get_model()`
-
-它主要做两件事：
-
-1. 确定模型配置来自 `RunConfig.model` 还是 `Agent.model`。
-2. 判断配置是 Model 实例，还是需要解析的模型名称。
-
-精简代码：
-
-```python
-def get_model(agent, run_config):
-    # RunConfig.model 优先
-    if isinstance(run_config.model, Model):
-        return run_config.model
-
-    if isinstance(run_config.model, str):
-        return run_config.model_provider.get_model(
-            run_config.model
-        )
-
-    # 其次使用 Agent.model
-    if isinstance(agent.model, Model):
-        return agent.model
-
-    return run_config.model_provider.get_model(
-        agent.model
-    )
-```
-
-这里有一个关键规则：
-
-**如果已经是 Model 实例，就直接使用；如果是模型名称字符串，就交给 ModelProvider 查找。**
-
-例如：
+假设这样配置 Agent：
 
 ```python
 agent = Agent(
-    name="Assistant",
-    model="gpt-4.1-mini"
-)
-
-result = await Runner.run(
-    agent,
-    "你好",
-    run_config=RunConfig(model="gpt-4.1")
+    name="Weather Assistant",
+    instructions="你是一个天气助手",
+    model="gpt-4.1",
+    tools=[get_weather],
 )
 ```
 
-本次运行优先使用 `RunConfig.model`。
+`"gpt-4.1"` 只是字符串，SDK 要先把它变成一个能发请求的 `Model` 实例。整个过程分两个动作：
 
-但为什么：
+1. `get_model()`：找到 Model 实例。
+2. `model.get_response()`：用它发起请求（3.2 展开）。
 
-```python
-run_config.model_provider.get_model(...)
-```
+### get_model() 的四个分支
 
-最终会进入 `MultiProvider.get_model()`？
-
-因为 `RunConfig` 默认这样配置：
+`get_model()`（[turn_preparation.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/turn_preparation.py)）的核心逻辑：
 
 ```python
-model_provider: ModelProvider = field(
-    default_factory=MultiProvider
-)
+def get_model(agent, run_config):
+    if isinstance(run_config.model, Model):            # 1. RunConfig 给了实例
+        return run_config.model
+    elif isinstance(run_config.model, str):            # 2. RunConfig 给了名称
+        return run_config.model_provider.get_model(run_config.model)
+    elif isinstance(agent.model, Model):               # 3. Agent 给了实例
+        return agent.model
+    return run_config.model_provider.get_model(agent.model)  # 4. Agent 给了名称或 None
 ```
 
-其中：
+两条规则：
 
-- `ModelProvider` 是抽象基类，定义 `get_model()` 接口。
-- `MultiProvider` 是默认具体实现。
-- `default_factory=MultiProvider` 表示未显式指定时创建 MultiProvider 实例。
+1. **`RunConfig.model` 优先于 `Agent.model`**：`Runner.run(..., run_config=RunConfig(model="gpt-4.1"))` 会覆盖 Agent 上配置的 `"gpt-4.1-mini"`。
+2. **Model 实例直接跳过 Provider**：只有字符串名称才需要 Provider 解析。
 
-所以：
+### ModelProvider：只负责“找模型”
 
 ```python
-run_config.model_provider.get_model("gpt-4.1")
+class ModelProvider(abc.ABC):
+    @abc.abstractmethod
+    def get_model(self, model_name: str | None) -> Model: ...
 ```
 
-默认实际执行：
+| 组件 | 职责 |
+|---|---|
+| `ModelProvider` | 查找接口 |
+| `MultiProvider` | 默认路由器：按模型名前缀选择 Provider |
+| `OpenAIProvider` | 构造具体的 OpenAI Model 实例 |
+| `Model` / `OpenAIResponsesModel` | 调用接口 / Responses API 实现 |
 
-```python
-MultiProvider.get_model("gpt-4.1")
-```
-
-这是 Python 的动态方法分派。
-
-如果开发者传入：
-
-```python
-RunConfig(model_provider=MyProvider())
-```
-
-则会执行自定义的 `MyProvider.get_model()`。
-
-**也就是说，调用方依赖 ModelProvider 接口，但实际调用哪个实现由运行时对象决定。**
-
-### MultiProvider 与 OpenAIProvider 怎么协作？
-
-`MultiProvider` 主要负责路由。
-
-对于没有 Provider 前缀的 `"gpt-4.1"`，默认交给 `OpenAIProvider`。
+`RunConfig.model_provider` 的默认值是 `MultiProvider`，所以对无前缀的 `"gpt-4.1"`：
 
 ```text
-MultiProvider.get_model("gpt-4.1")
-    ↓
-OpenAIProvider.get_model("gpt-4.1")
-    ↓
-OpenAIResponsesModel(...)
+get_model()
+  └─ MultiProvider.get_model("gpt-4.1")
+       └─ 无前缀 → OpenAIProvider.get_model("gpt-4.1")
+            └─ 返回 Model 实例
 ```
 
-源码：
+如果开发者提供自己的 `ModelProvider`，`get_model()` 和 Runner 都不需要修改——这就是这个抽象的价值。
 
-`src/agents/models/multi_provider.py`
+### OpenAIProvider 返回哪种 Model？
 
-`src/agents/models/openai_provider.py`
-
-`OpenAIProvider` 会根据配置返回不同的 Model 实现：
+`OpenAIProvider`（[openai_provider.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/models/openai_provider.py)）根据配置返回不同实现：
 
 ```python
-# 精简伪代码
-
-def get_model(self, model_name):
-    name = model_name or get_default_model()
-    client = self._get_client()
-
-    if not self._use_responses:
-        return OpenAIChatCompletionsModel(
-            model=name,
-            openai_client=client,
-        )
-
-    if use_websocket_transport:
-        return OpenAIResponsesWSModel(
-            model=name,
-            openai_client=client,
-        )
-
-    return OpenAIResponsesModel(
-        model=name,
-        openai_client=client,
-    )
+name = model_name or get_default_model()
+if not self._use_responses:
+    return OpenAIChatCompletionsModel(model=name, openai_client=...)
+if use_websocket_transport:
+    return OpenAIResponsesWSModel(model=name, openai_client=...)
+return OpenAIResponsesModel(model=name, openai_client=...)
 ```
 
-不同实现的区别：
-
-| Model | 底层接口 |
+| Model | API / 传输 |
 |---|---|
-| `OpenAIResponsesModel` | Responses API + HTTP |
+| `OpenAIResponsesModel` | Responses API + HTTP（本文默认） |
 | `OpenAIResponsesWSModel` | Responses API + WebSocket |
-| `OpenAIChatCompletionsModel` | Chat Completions API |
+| `OpenAIChatCompletionsModel` | Chat Completions |
 
-默认普通 HTTP 模式使用 `OpenAIResponsesModel`。
+**注意：到这里还没有发起请求，只是拿到了 Model 实例。**
 
-**注意：到这里仍然没有调用大模型，只是获得了一个具体 Model 对象。**
+## 3.2 获得 Model 实例后，如何真正发起 Responses API 请求？
 
-为了区分这些角色，可以再看一张局部结构图：
-
-```mermaid
-flowchart TD
-    A["Agent.model<br/>模型名称或 Model 实例"]
-    B["get_model()<br/>选择模型配置"]
-    C{"已经是 Model 实例？"}
-    D["ModelProvider<br/>按名称查找"]
-    E["MultiProvider<br/>默认路由"]
-    F["OpenAIProvider<br/>提供具体实现"]
-    G["Model 实例"]
-
-    A --> B --> C
-    C -->|"是"| G
-    C -->|"否"| D --> E --> F --> G
-
-    classDef config fill:#e9e5ff,stroke:#7c3aed,color:#312e81
-    classDef adapter fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-
-    class A config
-    class B,C,D,E,F,G adapter
-```
-
-到这里，模型解析就结束了。
-
-## 5.3 第二步：调用 Model，真正发送 API 请求
-
-现在已经得到：
-
-```python
-model = OpenAIResponsesModel(...)
-```
-
-接下来：
-
-```python
-await model.get_response(...)
-```
-
-才是真正使用这个 Model。
-
-完整链路如下：
+拿到 `model = OpenAIResponsesModel(...)` 之后，一次调用经过三层：
 
 ```mermaid
-flowchart TD
-    A["get_new_response()"]
-    B["get_response_with_retry()"]
-    C["执行 get_response 回调"]
-    D["model.get_response()"]
-    E["OpenAIResponsesModel.get_response()"]
-    F["self._fetch_response()"]
-    G["_build_response_create_kwargs()"]
-    H["client.responses.create()"]
-    I["原始 Response"]
-    J["转换成 ModelResponse"]
-    K["返回 get_new_response()"]
-
-    A --> B --> C --> D --> E
-    E --> F --> G --> H
-    H --> I --> J --> K
+flowchart LR
+    A["get_response_with_retry()"] --> B["model.get_response()"]
+    B --> C["OpenAIResponsesModel.get_response()"]
+    C --> D["_fetch_response()"]
+    D --> E["client.responses.create()"]
 ```
 
-我们沿着这张图继续看。
+### 第一层：get_response_with_retry()——统一的重试与超时
 
-### 为什么要经过 get_response_with_retry()？
-
-源码：
-
-`src/agents/run_internal/run_loop.py`
+`get_new_response()` 把调用包成 lambda 交给重试包装器：
 
 ```python
 new_response = await get_response_with_retry(
@@ -974,161 +897,66 @@ new_response = await get_response_with_retry(
         tools=all_tools,
         output_schema=output_schema,
         handoffs=handoffs,
-        tracing=get_model_tracing_impl(
-            run_config.tracing_disabled,
-            run_config.trace_include_sensitive_data,
-        ),
-        previous_response_id=previous_response_id,
-        conversation_id=conversation_id,
-        prompt=prompt_config,
+        tracing=..., previous_response_id=..., conversation_id=..., prompt=...,
     ),
-    rewind=rewind_model_request,
+    rewind=rewind_model_request,          # 失败重放前回滚已发送的输入
     retry_settings=model_settings.retry,
-    get_retry_advice=model.get_retry_advice,
-    previous_response_id=previous_response_id,
-    conversation_id=conversation_id,
     timeout=model_settings.timeout,
 )
 ```
 
-关键是这一段：
+为什么要多这一层？因为**重试、超时、失败前回滚（rewind）需要由同一个包装器统一控制**，而不是散落在每个 Model 适配器里。包装器内部最终执行的就是这个回调（[model_retry.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/model_retry.py)）：
 
 ```python
-get_response=lambda: model.get_response(...)
+response = await _await_model_attempt(get_response(), timeout)
 ```
 
-它把模型调用包装成回调，交给 `get_response_with_retry()` 执行。
+两个容易混淆的点：
 
-正常情况下只调用一次模型；发生符合策略的错误时，才可能重试。
+- **调用不代表一定重试**：成功就直接返回，只有符合策略的失败才会重试。
+- **Retry 与 Agent Loop 是两回事**：Agent Loop 负责多轮模型交互；Retry 只负责同一次逻辑调用内部的失败重试。
 
-在：
+### 第二层：model.get_response()——同一行代码，落到不同实现
 
-`src/agents/run_internal/model_retry.py`
-
-可以找到关键执行逻辑：
+`get_model()` 返回的 `model`，类型标注是 `Model`，但运行时它是一个具体对象，比如 `OpenAIResponsesModel`：
 
 ```python
-response = await _await_model_attempt(
-    get_response(),
-    timeout
-)
+model: Model = get_model(agent, run_config)   # 运行时是 OpenAIResponsesModel
+await model.get_response(...)                 # 执行的是这个具体对象的方法
 ```
 
-这里的 `get_response()` 是传进来的 lambda。
+Python 调用方法时看的是**对象本身**，而不是变量上的类型标注。所以同一行 `model.get_response(...)`，实际会走哪套实现，取决于你拿到的是哪个对象：
 
-因此实际执行的是：
-
-```python
+```text
 model.get_response(...)
+  ├─ OpenAIResponsesModel       → client.responses.create()
+  ├─ OpenAIChatCompletionsModel → client.chat.completions.create()
+  └─ LitellmModel               → litellm.acompletion()
 ```
 
-这里需要区分：
+这就是 Model 接口的意义：Runner 只需要写 `model.get_response(...)`，不需要用 `isinstance` 判断模型类型；具体发哪种请求，由实际拿到的对象决定。本文默认的对象是 `OpenAIResponsesModel`，所以下一层看它的实现。
 
-- Agent Loop：处理多轮模型调用与工具执行。
-- Retry Loop：处理同一次逻辑模型请求的失败重试。
+### 第三层：_fetch_response()——真正发出 HTTP 请求
 
-一次模型调用内部的重试，不会独立增加 Agent Turn。
-
-### 为什么 VS Code 会跳到 interface.py？
-
-因为 `model` 的静态类型是 `Model`。
-
-但默认情况下，它的实际对象是：
-
-```python
-OpenAIResponsesModel(...)
-```
-
-因此：
-
-```python
-await model.get_response(...)
-```
-
-运行时执行的是：
-
-```python
-OpenAIResponsesModel.get_response(...)
-```
-
-这同样是动态方法分派。
-
-如果想验证，可以在调用处打断点：
-
-```python
-type(model)
-```
-
-也可以使用：
-
-```python
-import inspect
-
-print(inspect.getfile(type(model)))
-print(inspect.getsourcelines(type(model).get_response)[1])
-```
-
-确认实际类所在的源码文件和方法行号。
-
-### 最后在哪里调用 Responses API？
-
-打开：
-
-`src/agents/models/openai_responses.py`
-
-找到：
-
-```python
-OpenAIResponsesModel.get_response()
-```
-
-内部继续调用：
-
-```python
-response = await self._fetch_response(
-    system_instructions,
-    input,
-    model_settings,
-    tools,
-    output_schema,
-    handoffs,
-    previous_response_id=previous_response_id,
-    conversation_id=conversation_id,
-    stream=False,
-    prompt=prompt,
-)
-```
-
-随后在 `_fetch_response()` 中：
+`OpenAIResponsesModel.get_response()` 内部调用 `_fetch_response()`，核心只有两步：
 
 ```python
 create_kwargs = self._build_response_create_kwargs(
-    # 构造模型请求参数
+    # model、instructions、input、tools、model_settings、output_schema 等
 )
 
 client = self._get_client()
-
-if not stream:
-    response = await client.responses.create(
-        **create_kwargs
-    )
+response = await client.responses.create(**create_kwargs)
 ```
 
-**`client.responses.create()` 才是真正发起 Responses API 请求的位置。**
+- `_build_response_create_kwargs()`：把 SDK 内部配置翻译成 Responses API 字段（model、instructions、input、tools/handoffs 声明、output_schema、`previous_response_id`、`conversation_id` 等）。
+- `client.responses.create()`：**真正发起 Responses API 请求的位置**。
 
-而 `_build_response_create_kwargs()` 负责将 SDK 内部的配置转换为 API 接受的参数，包括：
+所以 Runner 不需要知道 Responses API 接受哪些字段，参数转换全部由 Model 适配器完成。
 
-- 模型名称。
-- Instructions 和 Input。
-- Tools、Handoffs。
-- Model Settings、Output Schema。
-- `previous_response_id`、`conversation_id` 等上下文参数。
+### 为什么还要转换成 ModelResponse？
 
-### 为什么还要返回 ModelResponse？
-
-Responses API 返回的是原始 `Response`。
-
-模型适配器会将它转换成统一的 `ModelResponse`：
+Responses API 返回原始 `Response`，而 SDK 还支持 Chat Completions 等不同协议。如果 Runner 针对每种协议分别解析，就会与底层 API 耦合，因此适配器统一返回 `ModelResponse`：
 
 ```python
 return ModelResponse(
@@ -1139,77 +967,25 @@ return ModelResponse(
 )
 ```
 
-这样不论底层使用 Responses API 还是 Chat Completions API，上层 Agent Runtime 都可以处理统一的数据结构。
-
-结果沿着原调用链返回：
-
 ```text
-OpenAIResponsesModel.get_response()
-    ↓
-get_response_with_retry()
-    ↓
-get_new_response()
-    ↓
-run_single_turn()
-    ↓
-process_model_response()
+Responses API Response ───────┐
+                              ├── ModelResponse
+Chat Completions Response ────┘
 ```
 
-**到这里，我们已经完整走通模型调用链。**
+**Takeaway：ModelProvider 负责把模型名变成 Model 对象；Model 对象负责真正发请求。Runner 只认 `Model.get_response()` 这个约定，不关心底层是 Responses、Chat Completions 还是 LiteLLM。**
 
-## 5.4 这一层为什么这样设计？
+那么，模型返回以后，SDK 又是怎么知道下一步该做什么的？
 
-总结一下我们刚才看到的三个角色：
+## 3.3 模型返回后，SDK 如何解析响应？
 
-| 组件 | 负责什么 |
-|---|---|
-| Runner | 决定什么时候调用模型 |
-| ModelProvider | 根据模型名称找到具体 Model |
-| Model | 调用底层 API，并转换响应 |
-
-这套设计将模型解析和实际调用分开。
-
-如果没有 Model 接口，Runner 可能需要直接判断：
-
-```python
-if provider == "openai":
-    response = await openai.responses.create(...)
-
-elif provider == "anthropic":
-    response = await anthropic.messages.create(...)
-
-elif provider == "other":
-    response = await other.generate(...)
-```
-
-每增加一种模型适配方式，都可能修改 Runner。
-
-而现在：
-
-```python
-model = get_model(agent, run_config)
-response = await model.get_response(...)
-```
-
-Runner 不需要感知底层 API 的细节。
-
-优点是模型接入和执行控制解耦；代价是增加了抽象层，并需要处理不同模型之间的能力差异。
-
-**Takeaway：ModelProvider 负责找模型，Model 负责调用模型，Runner 负责管理何时调用。**
-
----
-
-# 六、模型返回之后：SDK 如何识别下一步动作？
-
-现在，我们已经发出了模型请求：
+我们已经追踪到：
 
 ```python
 response = await client.responses.create(...)
 ```
 
-但模型返回的，不一定是最终答案。
-
-例如，它可能返回：
+现在假设模型返回的不是一句普通回答，而是：
 
 ```json
 {
@@ -1233,30 +1009,24 @@ response = await client.responses.create(...)
 
 这是简化的响应示例。
 
-关键字段：
+注意：
 
-| 字段 | 含义 |
-|---|---|
-| `output[].type` | 模型输出类型 |
-| `name` | 模型想调用的工具 |
-| `arguments` | 工具参数 |
-| `call_id` | 工具调用 ID |
-| `usage` | 本次请求 Token 用量 |
+**模型没有执行 get_weather，只是告诉 SDK：我需要调用这个工具。**
 
-这里要注意：
+还有一个容易误解的地方：
 
-**`status="completed"` 表示本次模型响应完成，不代表整个 Agent Run 已经结束。**
+`status="completed"` 只意味着这一次模型响应已经完成，不代表整个 Agent 任务完成。
 
-模型可能只是告诉 SDK：“我需要调用 get_weather。”
+因为接下来还可能需要执行工具，再次调用模型。
 
-## 6.1 四种重要的数据结构
+### Response、ModelResponse、ProcessedResponse 有什么区别？
 
-从模型返回到 Runner 决策，中间有几层不同的数据结构。
+我们现在可以看到模型返回路径：
 
 ```mermaid
 flowchart TD
     A["client.responses.create()"]
-    B["Response<br/>原始模型 API 响应"]
+    B["Response<br/>底层模型 API 响应"]
     C["OpenAIResponsesModel.get_response()"]
     D["ModelResponse<br/>SDK 统一模型响应"]
     E["get_new_response()"]
@@ -1269,50 +1039,60 @@ flowchart TD
     A --> B --> C --> D --> E --> F --> G --> H --> I --> J
 ```
 
-| 数据结构 | 含义 |
+整个过程涉及四种重要的数据结构：
+
+| 对象 | 作用 |
 |---|---|
-| `Response` | 底层 API 返回的原始数据 |
-| `ModelResponse` | SDK 统一模型响应 |
-| `ProcessedResponse` | 模型输出被解析、分类后的结果 |
-| `SingleStepResult` | 本轮执行产物和下一步控制指令 |
+| `Response` | 模型 API 的原始响应 |
+| `ModelResponse` | SDK 统一模型响应格式 |
+| `ProcessedResponse` | 解析并分类模型输出 |
+| `SingleStepResult` | 保存本轮执行结果和下一步控制指令 |
 
-## 6.2 process_model_response() 做什么？
+它们并不是重复包装同一份数据，而是在不同层次解决不同问题。
 
-打开：
+`ModelResponse` 解决底层模型接口的差异。
 
-`src/agents/run_internal/turn_resolution.py`
+`ProcessedResponse` 解决模型输出中包含哪些操作的问题。
 
-找到：
+`SingleStepResult` 则解决操作完成以后，Runner 下一步该做什么的问题。
 
-```python
-process_model_response()
-```
+### process_model_response() 如何分类模型输出？
 
-它会接收模型响应、可用 Tools、Handoffs 和 Output Schema 等信息。
+源码：
 
-然后遍历：
+[src/agents/run_internal/turn_resolution.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/turn_resolution.py)
+
+它会根据当前 Agent 可用的 Tools、Handoffs 等配置，解析模型输出。
+
+例如：
 
 ```python
 for output in response.output:
     ...
 ```
 
-精简伪代码：
+可以把关键逻辑简化为：
 
 ```python
+# 教学伪代码
+
 for output in response.output:
 
     if isinstance(output, ResponseOutputMessage):
+        # 普通模型消息
         items.append(MessageOutputItem(...))
 
     elif isinstance(output, ResponseFunctionToolCall):
 
         if is_handoff_tool_call(output):
+            # Agent 交接请求
             items.append(HandoffCallItem(...))
             handoffs.append(ToolRunHandoff(...))
 
         else:
+            # 普通 Function Tool 请求
             tool = find_function_tool(output)
+
             items.append(ToolCallItem(...))
             functions.append(ToolRunFunction(...))
 
@@ -1323,48 +1103,44 @@ return ProcessedResponse(
 )
 ```
 
-真实源码还会处理更多类型；这里仅保留普通消息、Function Tool 和 Handoff。
+这里省略了其他模型输出、工具类型、校验与异常处理。
 
-重点是：
+重点不是具体有多少种类型，而是这个函数的职责：
 
-**process_model_response() 只负责识别和分类，不负责执行普通 Python 工具函数。**
+**根据模型输出和当前 Agent 的可用能力，识别并组织待执行操作。**
 
-### 为什么 Handoff 也可能表现为 Function Call？
+例如，模型返回：
 
-因为 SDK 借用了模型的 Function Calling 机制，来表达 Agent 之间的控制权交接。
-
-例如：
-
-```text
-模型调用 transfer_to_refund_agent
-    ↓
-SDK 识别为 Handoff
-    ↓
-切换到 Refund Agent
-    ↓
-继续执行
+```json
+{
+  "type": "function_call",
+  "name": "get_weather",
+  "arguments": "{\"city\":\"上海\"}",
+  "call_id": "call_001"
+}
 ```
 
-普通 Function Tool 和 Handoff 的模型调用形式可能相似，但执行语义不同。
+`process_model_response()` 会识别这是一个 Function Tool Call，并匹配对应工具。
 
-## 6.3 从 ProcessedResponse 到 SingleStepResult
+如果返回的工具名称是某个 Handoff，则会识别为 Agent 交接请求。
 
-解析完成后：
+但是，**到这里还没有真正执行普通 Python 工具函数。**
+
+### 为什么要把解析与执行分开？
+
+因为模型提出操作意图，不意味着 SDK 可以立刻执行。
+
+执行之前，还可能涉及工具查找、参数校验、权限审批、Guardrails 等逻辑。
+
+因此，SDK 会先完成模型输出解析，形成 `ProcessedResponse`。
+
+然后将它交给：
 
 ```python
-processed_response = process_model_response(...)
+execute_tools_and_side_effects(...)
 ```
 
-再进入：
-
-```python
-result = await execute_tools_and_side_effects(
-    processed_response=processed_response,
-    ...
-)
-```
-
-执行阶段负责工具调用、Handoff、审批、部分校验及执行结果的组织。
+由执行阶段处理工具调用、Handoff 及相关副作用。
 
 最后生成：
 
@@ -1372,221 +1148,187 @@ result = await execute_tools_and_side_effects(
 SingleStepResult(...)
 ```
 
-由 Runner 读取：
+交还给 Runner。
+
+Runner 再读取：
 
 ```python
-result.next_step
+next_step = turn_result.next_step
 ```
 
 决定下一轮动作。
 
-这就闭合了整个 Agent Loop。
-
----
-
-# 七、重新看完整执行链路
-
-现在，我们已经能把最开始的天气助手与 SDK 源码对应起来：
+于是整个执行流程终于闭合：
 
 ```text
-用户：明天上海适合跑步吗？
+Runner
     ↓
-Runner.run()
+Single Turn
     ↓
-AgentRunner.run()
+Model Provider / Model
     ↓
-_run_impl()
-    ↓
-run_single_turn()
-    ↓
-get_new_response()
-    ↓
-get_model()
-    ↓
-MultiProvider → OpenAIProvider
-    ↓
-OpenAIResponsesModel
-    ↓
-get_response_with_retry()
-    ↓
-model.get_response()
-    ↓
-_fetch_response()
-    ↓
-_build_response_create_kwargs()
-    ↓
-client.responses.create()
-    ↓
-Response
+Responses API
     ↓
 ModelResponse
     ↓
-process_model_response()
-    ↓
 ProcessedResponse
     ↓
-execute_tools_and_side_effects()
+Tool Execution
     ↓
 SingleStepResult
     ↓
-Runner 读取 next_step
-    ├── RunAgain：继续执行
-    ├── Handoff：切换 Agent
-    ├── FinalOutput：结束
-    └── Interruption：暂停
+NextStep
+    ↓
+Runner
 ```
 
-这条链路可以分为三个层次：
+### 第三章的设计 Takeaway
 
-**Runner：控制执行生命周期。**
+为什么 SDK 要把 ModelProvider、Model、Response Processing 分成不同模块？
 
-**Model：处理模型交互。**
+因为它们分别解决不同问题：
 
-**Tool Execution：执行模型请求的动作。**
+- **ModelProvider**：找到需要调用的模型。
+- **Model**：隔离不同模型 API 的请求与响应差异。
+- **Response Processing**：将模型输出转换成 Agent Runtime 能够理解的动作。
+- **Runner**：不关心底层模型协议，只负责运行控制。
 
-三个部分通过明确的数据结构和接口协作。
+这种设计的好处是模块之间的职责清晰，便于替换 Model、扩展工具和维护 Agent Loop。
 
----
+代价则是增加了抽象层，也让源码调用链更长。
 
-# 八、设计取舍：为什么这样设计？
+**本章 Takeaway**
 
-## 8.1 Runner.run(agent, input) vs agent.run(input)
+> Agents SDK 先解析模型配置并获得 Model 实例，再通过统一的 `get_response()` 接口调用模型。模型响应会依次经过统一包装与动作分类，最终交给执行阶段处理，从而使 Runner 不依赖具体模型 API。
 
-独立 Runner 的主要价值是将 Agent 配置与执行逻辑分离。
+到这里，我们已经研究了从用户请求进入 Runner，到真正发起模型调用，再到解析模型输出的完整链路。
 
-配置可以复用，运行状态由每次执行分别管理。
+但还有一个关键问题：
 
-但这种分离并不是实现配置复用的必要条件。
+**模型返回 Function Call 后，SDK 究竟如何把它变成真实的 Python 函数执行？**
 
-## 8.2 Handoff 借用 Function Calling
-
-Handoff 将“切换 Agent”建模为特殊工具调用，复用现有 Function Calling 协议。
-
-这使得 SDK 无需为多 Agent 交接设计全新的模型协议。
-
-但是，如果模型自主决定何时 Handoff，业务系统如何确保转交条件已经满足？
-
-不能只依赖模型指令或工具描述。
-
-可以进一步研究工具启用条件、Handoff 回调中的校验，以及应用层确定性控制机制。
-
-特别注意：`@input_guardrail` 不等于每次 Handoff 前都会运行的校验。
-
-## 8.3 模型驱动控制流与显式工作流
-
-Agents SDK 适合模型根据任务情况选择下一步的场景，例如单 Agent 多工具调用、客服分流、多 Agent 协作。
-
-如果业务涉及严格固定步骤、审批和确定性分支，则可以考虑显式工作流框架或自行实现状态机。
-
-初步观点：
-
-**模型负责处理不确定性决策，业务系统应负责不可妥协的执行规则。**
-
-这一结论需要后续结合 Handoff、工具异常和框架对比实验进一步验证。
+这就是下一章需要研究的 Tool Execution。
 
 ---
 
-# 九、下一步：Tool Execution
+# 第四章：Tool Execution——模型如何调用并执行真实工具？
 
-我们目前已经研究了：
+ 我们获得结果后会解析出工具、转交、模型回答。
+openai-agents-python/src/agents/run_internal/turn_resolution.py:4016
 
-**从用户请求进入 Runner，到调用模型，再到识别模型输出。**
+例如 3.3里模型返回了
+```python
+ {"type": "function_call", "name": "get_weather", "arguments": "{\"city\":\"上海\"}", "call_id": "call_001"}
+ ```
 
-但是还有一个最关键的问题：
+ 通过type可以把tool区分出来。
 
-模型返回：
 
-```json
-{
-  "type": "function_call",
-  "name": "get_weather",
-  "arguments": "{\"city\":\"上海\"}",
-  "call_id": "call_weather"
-}
+但tool实际上是一个python函数，大模型并不能直接读取 Python 内存中的函数对象，也无法自己执行它
+
+```python
+def get_weather(city: str) -> str:
+    """查询指定城市的天气"""
+    return f"{city}：晴天"
 ```
 
-SDK 到底怎样将这个调用意图变成真正的 Python 函数执行？
+这里就需要sdk需要把函数变成模型能够理解的描述，提供一个执行入口。
 
-下一阶段研究：
 
-1. 如何根据名称找到对应的 Python Function Tool？
-2. 如何将 JSON 参数转换为 Python 参数？
-3. 参数校验在哪里发生？
-4. 工具失败如何处理？
-5. 工具结果如何变成 ToolCallOutputItem？
-6. 什么时候继续模型调用，什么时候可以直接结束？
-7. Handoff 和普通 Function Tool 的执行有什么不同？
 
-## 9.1 实验设计
 
-| 实验 | 验证目标 |
-|---|---|
-| 正常工具调用 | Tool Call → Tool Output → 再次模型调用 |
-| 工具参数错误 | 参数校验及异常路径 |
-| 工具抛出异常 | 错误转换与终止行为 |
-| 连续调用工具 | Agent Loop 与 max_turns |
-| stop_on_first_tool | 工具直接结束任务 |
-| Handoff | 当前 Agent 切换 |
-| NextStepInterruption | 暂停和恢复 |
+# 第五章：Handoff——如何实现多 Agent 控制权交接？
 
-每个实验记录输入、模型响应、执行 Trace、关键源码位置和实际结果。
+*待研究*
+
+# 第六章：State & Lifecycle——上下文、Session、中断与恢复机制
+
+*待研究*
+
+# 第七章：Guardrails、Streaming 与 Tracing——安全、流式执行与可观测性
+
+*待研究*
+
+# 第八章：源码实验——验证工具异常、循环停止、Handoff 与恢复机制
+
+*待研究*
+
+# 第九章：架构设计取舍——Agents SDK、Responses API 与 LangGraph
+
+*待研究*
+
+# 第十章：总结与应用——如何设计自己的 Agent Runtime？
+
+*待研究*
 
 ---
 
-# 十、核心源码索引
+## 当前源码阅读索引
 
-仓库：https://github.com/openai/openai-agents-python
+以下是前三章涉及的核心源码文件。
 
-| 模块 | 源码 |
+| 研究内容 | 源码路径 |
 |---|---|
-| Runner 主入口与 Agent Loop | `src/agents/run.py` |
-| Single Turn | `src/agents/run_internal/run_loop.py` |
-| get_model | `src/agents/run_internal/turn_preparation.py` |
-| RunConfig | `src/agents/run_config.py` |
-| Model / ModelProvider 接口 | `src/agents/models/interface.py` |
-| MultiProvider | `src/agents/models/multi_provider.py` |
-| OpenAIProvider | `src/agents/models/openai_provider.py` |
-| OpenAIResponsesModel | `src/agents/models/openai_responses.py` |
-| 模型请求重试 | `src/agents/run_internal/model_retry.py` |
-| 模型响应解析 | `src/agents/run_internal/turn_resolution.py` |
-| NextStep / SingleStepResult | `src/agents/run_internal/run_steps.py` |
-| 工具定义 | `src/agents/tool.py` |
-| RunItems | `src/agents/items.py` |
+| Agent 定义 | [src/agents/agent.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/agent.py) |
+| Runner 与 Agent Loop | [src/agents/run.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run.py) |
+| Single Turn / get_new_response | [src/agents/run_internal/run_loop.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/run_loop.py) |
+| get_model | [src/agents/run_internal/turn_preparation.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/turn_preparation.py) |
+| RunConfig | [src/agents/run_config.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_config.py) |
+| Model / ModelProvider 接口 | [src/agents/models/interface.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/models/interface.py) |
+| MultiProvider | [src/agents/models/multi_provider.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/models/multi_provider.py) |
+| OpenAIProvider | [src/agents/models/openai_provider.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/models/openai_provider.py) |
+| OpenAIResponsesModel | [src/agents/models/openai_responses.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/models/openai_responses.py) |
+| 模型重试 | [src/agents/run_internal/model_retry.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/model_retry.py) |
+| 响应解析与执行分发 | [src/agents/run_internal/turn_resolution.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/turn_resolution.py) |
+| NextStep / SingleStepResult | [src/agents/run_internal/run_steps.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/run_internal/run_steps.py) |
+| 运行项定义 | [src/agents/items.py](https://github.com/openai/openai-agents-python/blob/main/src/agents/items.py) |
 
-### 原笔记中的关键行号
+### 关键源码位置
 
-以下保留为查阅索引；正式分享前需要与研究使用的 Git Commit 核对：
+以下保留原始研究笔记中使用的定位。行号与具体 Git Commit 有关，正式分享前应固定版本并核对。
 
 ```text
-src/agents/run_internal/run_loop.py:2961
+src/agents/run.py
+    AgentRunner._run_impl()
+
+src/agents/run_internal/run_loop.py
+    run_single_turn()
+    get_new_response()
+
 src/agents/run_internal/turn_preparation.py:134
+    get_model()
+
+src/agents/models/interface.py
+    Model
+    ModelProvider
+
+src/agents/models/multi_provider.py
+    MultiProvider.get_model()
 
 src/agents/models/openai_provider.py:244
+    OpenAIProvider.get_model()
 
-src/agents/run_internal/run_loop.py:2907
-src/agents/run_internal/model_retry.py:543
 src/agents/run_internal/model_retry.py:580
+    get_response_with_retry() 内部模型调用
 
 src/agents/models/openai_responses.py:543
-src/agents/models/openai_responses.py:563
+    OpenAIResponsesModel.get_response()
+
 src/agents/models/openai_responses.py:803
-src/agents/models/openai_responses.py:816
+    _fetch_response()
+
 src/agents/models/openai_responses.py:830
+    client.responses.create()
+
 src/agents/models/openai_responses.py:620
+    Response → ModelResponse
+
+src/agents/run_internal/turn_resolution.py
+    process_model_response()
+    execute_tools_and_side_effects()
 
 src/agents/run_internal/run_steps.py:192
+    SingleStepResult
 ```
 
----
-
-# 阶段性总结
-
-现在我们已经掌握：
-
-**Agent 声明能力，Runner 驱动执行，ModelProvider 找到具体模型，Model 负责模型 API 交互，Single Turn 组织响应处理和本地动作，NextStep 决定下一步控制流。**
-
-而我们最终要研究清楚的是：
-
-**OpenAI 如何将模型调用、工具执行和状态转换组合成一个通用、可扩展的 Agent Runtime。**
-
-下一步将从 `execute_tools_and_side_effects()` 开始，真正进入 Tool Execution 的实现。
+> **后续研究原则：** 每个新模块都沿真实调用链学习，保留核心 Mermaid 图、精简伪代码、真实源码位置、设计取舍和实验依据，而不为了覆盖所有 SDK 功能偏离研究主线。
