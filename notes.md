@@ -1,12 +1,13 @@
 ### 1、agents sdk？
-1）解决什么问题？
+1）LLM调用到Agent
 普通LLM调用：一问一答。Prompt-> LLM -> Answers
 Agent：需要执行多个步骤完成任务。Agent = LLMs+Tools+Memory+Logic
 问明天天气适合户外运动吗？ -> 模型查天气 -> 模型得到结果，台风天 -> 模型根据信息给出回答。
 
-- 复杂问题可能不只查一轮工具，而且还会查memory（比如用户住在哪个城市）等其他context，这些调用需要有管理。
+复杂问题可能不只查一轮工具，而且还会查memory（比如用户住在哪个城市）等其他context，这些调用需要有管理。
 
-Agents SDK：提供通用的agent运行能力，相当于是构建agent的一个脚手架。
+2）Agents SDK解决什么问题。
+提供通用的agent运行能力，相当于是构建agent的一个脚手架。
 - Agent配置转化为模型请求
 - 处理模型返回的function tool call
 - 执行tools、把tools返回的结构给模型
