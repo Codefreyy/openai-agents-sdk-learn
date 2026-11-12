@@ -1,0 +1,7 @@
+TOOL HOOK EVENTS: llm_start:weather -> llm_end:weather -> tool_start:get_weather -> tool_body:Tokyo -> tool_end:get_weather -> llm_start:weather -> llm_end:weather
+TOOL HOOK ASSERTIONS: PASS
+HANDOFF TOOL: transfer_to_specialist
+HANDOFF EVENTS: llm_start:triage -> llm_end:triage -> handoff:triage->specialist -> llm_start:specialist -> llm_end:specialist
+LAST AGENT: specialist
+MODEL CALLS: 1 1
+HANDOFF ASSERTIONS: PASS

@@ -1,0 +1,13 @@
+PASS: 9 chapters, quizzes and fixed-commit source references
+PASS: all 9 chapter routes render, with current navigation and quizzes
+PASS: weather stepper, end boundaries and reset
+PASS: all 15 teaching markers show pinned source excerpts
+PASS: valid/error/missing argument scenarios retain evidence boundaries
+PASS: four NextStep choices and all lifecycle event source selections
+PASS: five prediction gates reveal saved logs and explanations
+PASS: quiz feedback, persisted read progress and reversal
+PASS: review-card reveal/navigation and glossary search/empty state
+PASS: material downloads, presenter/Escape, 390px layout, reduced-motion and print styles
+PASS: direct file:// entry works without a local server
+PASS: invalid saved progress does not prevent reading
+PASS: no browser console errors or uncaught page exceptions

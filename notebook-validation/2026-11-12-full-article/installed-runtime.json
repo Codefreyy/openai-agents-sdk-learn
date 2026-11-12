@@ -1,0 +1,48 @@
+{
+  "sdk_version": "0.24.0",
+  "sdk_path": "/tmp/agents-sdk-full-workshop-20261112/env/lib/python3.11/site-packages/agents",
+  "openai_version": "3.49.0",
+  "pydantic_version": "2.14.3",
+  "comparison_scope": [
+    {
+      "file": "run.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "agent.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "tool.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "run_config.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "lifecycle.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "run_internal/run_loop.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "run_internal/turn_resolution.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "run_internal/tool_execution.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "run_state.py",
+      "matches_pinned_commit": true
+    },
+    {
+      "file": "testing/model.py",
+      "matches_pinned_commit": true
+    }
+  ]
+}
