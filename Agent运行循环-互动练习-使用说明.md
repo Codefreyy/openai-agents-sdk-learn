@@ -6,7 +6,20 @@
 
 在 Colab 上传 ipynb，或在此文件推送到 GitHub 后，使用已有 Colab/GitHub 链接。先保存自己的副本，然后从安装单元格顺序运行。网站已发布的下载资源是此前的快照，不会因为本地文件修改自动更新；GitHub 和 NoCode 的共享版本需在确认新版后同步。
 
-主线不需要 API Key。ScriptedModel 返回预设响应，但 Runner、FunctionTool、Handoff、Session、RunState、Hooks、护栏和事件处理由真实 SDK 执行。模拟天气、用户和退款全部是教学数据。最后的真实 API 尝试默认关闭；Trace 示例只写入内存处理器。
+主线不需要 API Key。ScriptedModel 返回预设响应，但 Runner、FunctionTool、Handoff、Session、RunState、Hooks、护栏和事件处理由真实 SDK 执行。模拟天气、用户和退款全部是教学数据。末尾提供可选的真实模型天气、Handoff 实验，默认关闭；Trace 示例只写入内存处理器。
+
+## 有 API Key 的听众怎么参与
+
+建议先完成主线，再定位到练习本末尾“可选路线 · 使用你自己的大模型”。
+
+1. 在 Colab 左侧钥匙图标的 Secrets 中添加 OPENAI_API_KEY，并允许当前 Notebook 访问。不要把密钥填进代码单元。
+2. 在配置单元设置 RUN_REAL_MODEL = True，按账号可用情况填写 REAL_MODEL。使用官方 OpenAI 服务时保留 API_BASE_URL 与 responses 协议；兼容网关则按提供方说明配置地址、模型与协议。
+3. 先运行配置，再运行“真实实验 A”天气单元。观察模型事件、实际轮次、工具执行和最终回答；天气数据仍是固定教学数据。
+4. 想观察交接时，将 RUN_REAL_HANDOFF 改为 True，再运行“真实实验 B”。观察 handoff 事件与最终 Agent。
+
+本地环境可把 KEY_SOURCE 改为 environment，读取已有环境变量；也支持 masked_input，在运行时隐藏输入密钥。客户端和 SDK 的自动重试关闭，外部 Trace 导出关闭，模型轮次最多为 5；轮次限制不等于费用上限。
+
+有 Key 不代表一定有模型权限或额度，兼容网关也需要支持工具调用。真实模型结果不固定，所以没有把主线所有 ScriptedModel 实验直接替换成真实调用。修改问题后可以对比工具参数、是否交接、回答和轮次的变化。
 
 ## 对应关系和现场安排
 
@@ -32,5 +45,7 @@
 ## 验证与边界
 
 实际结果记录在同目录 Agent运行循环-互动练习-全文版-CloudIDE运行记录.log 和 Agent运行循环-互动练习-全文版-验收.md。
+
+真实模型选项的新增验证见 Agent运行循环-互动练习-真实模型选项-验收.md：默认关闭时全文 30 / 30 代码单元通过；两种协议的天气、Handoff 和错误处理通过模拟 HTTP 接口验证。没有使用真实密钥、发起真实模型请求，也没有实测 Colab Secrets 界面。
 
 本次不验证真实模型决策质量、真实天气/退款、恢复拒绝与再次审批、跨进程恢复、故障取消、网络 Retry、全部工具类型、OpenAI 平台 Trace 导出或 LangGraph。第十章最小执行器只用于展示控制流，省略生产执行器需要的 Schema、校验、审批和异常边界。

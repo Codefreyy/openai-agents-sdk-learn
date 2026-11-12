@@ -1,0 +1,109 @@
+{
+  "success": true,
+  "scenarios": 14,
+  "tests": [
+    {
+      "scenario": "default_disabled_no_key_read",
+      "pass": true
+    },
+    {
+      "scenario": "responses_weather",
+      "pass": true,
+      "mock_http_requests": 2,
+      "events": [
+        "llm_start:Real Weather Agent",
+        "llm_end:Real Weather Agent",
+        "tool_start:real_demo_weather",
+        "tool_body:上海",
+        "tool_end:real_demo_weather",
+        "llm_start:Real Weather Agent",
+        "llm_end:Real Weather Agent"
+      ]
+    },
+    {
+      "scenario": "responses_handoff",
+      "pass": true,
+      "mock_http_requests": 2,
+      "events": [
+        "llm_start:Triage Agent",
+        "llm_end:Triage Agent",
+        "handoff:Triage Agent->Refund Agent",
+        "llm_start:Refund Agent",
+        "llm_end:Refund Agent"
+      ]
+    },
+    {
+      "scenario": "responses_error_401",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "responses_error_429",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "responses_error_400",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "responses_error_connection",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "chat_completions_weather",
+      "pass": true,
+      "mock_http_requests": 2,
+      "events": [
+        "llm_start:Real Weather Agent",
+        "llm_end:Real Weather Agent",
+        "tool_start:real_demo_weather",
+        "tool_body:上海",
+        "tool_end:real_demo_weather",
+        "llm_start:Real Weather Agent",
+        "llm_end:Real Weather Agent"
+      ]
+    },
+    {
+      "scenario": "chat_completions_handoff",
+      "pass": true,
+      "mock_http_requests": 2,
+      "events": [
+        "llm_start:Triage Agent",
+        "llm_end:Triage Agent",
+        "handoff:Triage Agent->Refund Agent",
+        "llm_start:Refund Agent",
+        "llm_end:Refund Agent"
+      ]
+    },
+    {
+      "scenario": "chat_completions_error_401",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "chat_completions_error_429",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "chat_completions_error_400",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "chat_completions_error_connection",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "missing_key",
+      "pass": true
+    }
+  ],
+  "real_api_requests": 0,
+  "transport": "httpx2.MockTransport",
+  "sdk": "0.24.0"
+}
