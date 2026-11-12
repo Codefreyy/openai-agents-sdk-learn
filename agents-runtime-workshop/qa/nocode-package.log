@@ -1,1 +1,0 @@
-PASS: single-file srcDoc renders all chapters; hash navigation stays inside one iframe; interactive weather step works; embedded notebook downloads and parses; all material links use embedded data; no page exceptions

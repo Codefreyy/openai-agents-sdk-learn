@@ -1,9 +1,0 @@
-{
-  "success": true,
-  "cells": 63,
-  "code_cells": 28,
-  "executed_code_cells": 28,
-  "python": "3.11.11",
-  "sqlite": "3.45.3",
-  "real_api_call_enabled": false
-}

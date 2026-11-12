@@ -8,7 +8,94 @@
 >
 > 本文主要研究非流式执行路径。代码包含源码片段与教学伪代码；伪代码用于突出核心机制，不代表可以直接替换 SDK 内部实现。
 
+## 自学路线：跟着一条天气请求读源码
+
+先读第一章的最小 Agent，然后用 [weather_turn.py](./experiments/weather_turn.py) 观察一个带工具的 Agent。脚本从本地 `.openai-api-key` 读取 Key，使用真实的 `gpt-4.1`，每次运行会产生 API 调用。天气函数返回固定的示例天气，便于理解流程。
+
+### ① 模型第一次看到了什么？
+
+先看 `get_weather` 和 `Agent(...)`，猜一猜模型会请求什么工具，再从仓库根目录运行：
+
+```bash
+python3 experiments/weather_turn.py
+```
+
+一次本机运行的输出如下。真实模型每次生成的参数和回答可能不同。
+
+```text
+模型调用前｜指令 先用工具查询天气，再用简短中文给出户外运动建议。
+用户输入｜ 明天上海适合户外运动吗？
+模型请求工具｜ get_weather {"city":"上海"}
+
+模型调用前｜指令 先用工具查询天气，再用简短中文给出户外运动建议。
+用户输入｜ 明天上海适合户外运动吗？
+工具结果交回模型｜ 上海：晴天（示例数据）
+本地工具返回｜ 上海：晴天（示例数据）
+模型调用次数｜ 2
+最终回答｜ 上海明天天气晴，适合进行户外运动。注意防晒，多喝水。
+```
+
+`ObserveCalls` 用 SDK 的 `RunHooks` 观察模型调用前的指令、输入，以及模型返回的工具请求。第二次调用前出现的工具结果表明 SDK 已经执行了函数，并将返回值放入模型输入。脚本在运行结束后统一打印“本地工具返回”，因此该行的显示位置晚于实际工具执行。
+
+打开固定版本的 [model.get_response 调用](https://github.com/openai/openai-agents-python/blob/17d994bd3045dae71acda676a4ef4762ed8ecd94/src/agents/run_internal/run_loop.py#L3026)，看看 SDK 传给模型接口的指令、输入和工具。
+
+### ② 工具执行完为什么有时还要再问一次模型？
+
+先猜一猜，如果设置工具执行完就停止，模型调用次数会变成多少。运行：
+
+```bash
+python3 experiments/weather_turn.py --stop
+```
+
+本机这次使用同一个用户输入和工具，模型请求了 `get_weather({"city":"上海"})`。默认模式调用了两次模型，最终回答是模型根据工具结果生成的建议；停止模式调用了一次模型，最终回答直接是 `上海：晴天（示例数据）`。
+
+真实模型每次可以做出不同选择，所以两次运行的请求内容并非保证相同。对照时先看“模型请求工具”是否一致，再比较后续过程。可以把工具返回的“晴天”改成“大雨”重新运行，观察模型的回答如何变化。
+
+对照固定版本的 [工具停止策略](https://github.com/openai/openai-agents-python/blob/17d994bd3045dae71acda676a4ef4762ed8ecd94/src/agents/run_internal/turn_resolution.py#L776)，以及本地 `run.py` 中的 `# *08` 和 `# *11` 标记。
+
+### ③ 工具抛出的异常会交给谁？
+
+现有 [工具异常对照实验](./experiments/tool_error_experiment.py) 暂时使用 ScriptedModel 固定工具请求，以便两组对照。它让同一函数抛出 `ValueError`，比较默认错误处理与 `failure_error_function=None`。详细结果与源码见第 8.1 节。
+
+```bash
+python3 experiments/tool_error_experiment.py
+```
+
+2026-11-12 在本机用 Python 3.11.15、SDK 0.24.0 运行天气脚本的两种模式，均成功退出。加载的源码工作树包含本地阅读标记，基线提交为 `17d994bd3045dae71acda676a4ef4762ed8ecd94`。
+
 ## 第一章：为什么需要 Agents SDK？整体架构是什么？
+
+### 先运行一个最小 Agent
+
+本地示例：[hello_agent.py](./hello_agent.py)。它从本地 `.openai-api-key` 文件读取 API Key，然后创建 Agent、调用 `Runner.run_sync()`，最后只打印 `result.final_output`。密钥文件位于 Git 忽略列表，不随仓库分享；示例暂时关闭 Trace，先聚焦一次最基本的运行。
+
+2026-11-12 本机运行成功，真实模型返回：“你好，我是一个由人工智能驱动的智能助手，可以帮助你解答问题和处理各类任务。” 本次使用 Python 3.11、SDK 0.24.0 和 `gpt-4.1`，进程退出码为 0；Trace 已关闭。第一次尝试返回 401，是输入 Key 时发生错误，不应据此判断 Key 已失效。工具异常的模拟对照保留在 [experiments/tool_error_experiment.py](./experiments/tool_error_experiment.py)，供后续学习。
+
+示例的核心配置和调用：
+
+```python
+agent = Agent(name="助手", instructions="请用简洁的中文回答。", model="gpt-4.1")
+result = Runner.run_sync(agent, "你好，请用一句话介绍你自己。")
+print(result.final_output)
+```
+
+`Agent(...)` 创建配置对象：`name` 是名称，`instructions` 是回答指令，`model` 是模型名称。这里没有配置工具或交接；创建对象时还没有调用模型。`Runner.run_sync()` 接收 Agent 和本次用户输入，同步等待运行结果；`final_output` 是从结果中取出最终回答。
+
+对应本地 SDK 的简化调用路径是：
+
+```text
+Runner.run_sync()
+  → AgentRunner.run_sync()
+  → AgentRunner._run_sync_impl()
+  → AgentRunner.run()             # 内部异步入口
+  → AgentRunner._run_impl()       # 运行循环
+  → run_single_turn()             # 一轮模型交互及处理
+  → RunResult.final_output
+```
+
+`_run_sync_impl` 通过事件循环运行异步的 `AgentRunner.run()` 并等待结果；同步不代表 SDK 内部没有异步代码。这条路径是简化导航，省略了配置准备、异常处理和清理。`AgentRunner` 是 SDK 内部实现，业务代码使用公开的 `Runner`。
+
+本次真实运行只打印了最终回答，没有记录实际模型请求次数或逐步事件；这些信息需要后续通过记录工具或 Trace 观察。本地源码基于固定 commit，但工作树有未提交修改，行号以本地文件为准。
 
 ### 1.1 从普通 LLM 调用到 Agent
 
@@ -4031,102 +4118,56 @@ run_config = RunConfig(
 3. Handoff 是否真的切换了 Agent？
 4. 审批中断后，如何避免重新执行已完成的操作？
 
-这些实验使用模拟业务数据。涉及模型请求的实验需要配置可用的 API，并建议配合 Trace 观察执行链路。
-
-以下是实验代码与**预期行为**，不是声称已经执行得到的结果。
+这些实验使用模拟业务数据。8.1 已在本机用 ScriptedModel 控制模型响应，运行真实 SDK，不需要 API Key。后续 8.2—8.4 的正文示例仍按各自的说明阅读，预期行为与实际运行结果应分别记录。
 
 ### 8.1 实验一：FunctionTool 执行失败
 
-先看一个会抛出异常的工具：
+**研究问题：** 工具函数抛出异常后，为什么 Run 有时继续，有时终止？
 
-```python
-from agents import (
-    Agent,
-    Runner,
-    ModelSettings,
-    function_tool,
-)
+#### 先设计对照
 
-@function_tool
-def unstable_tool(value: str) -> str:
-    """执行测试操作。"""
-    raise ValueError("模拟数据库故障")
+本地实验文件：[tool_error_experiment.py](./experiments/tool_error_experiment.py)。A、B 两组使用同一个 `unstable_tool` 函数、相同参数和相同的模型响应，区别只有工具错误处理配置：
 
-agent = Agent(
-    name="Test Agent",
-    instructions="调用工具处理请求。",
-    tools=[unstable_tool],
-    model_settings=ModelSettings(
-        tool_choice="unstable_tool"
-    ),
-)
+| 组别 | 配置 | 观察什么 |
+|---|---|---|
+| A | `function_tool(unstable_tool)` | SDK 默认怎样处理工具异常 |
+| B | `function_tool(unstable_tool, failure_error_function=None)` | 关闭默认错误转换后，异常怎样传播 |
 
-result = await Runner.run(
-    agent,
-    "调用工具，参数 value 为 test",
-)
+两个工具都由同一个函数包装。进入业务函数时，终端会显示 `value=test`，随后函数抛出 `ValueError("模拟数据库故障")`。两组共用相同的 ScriptedModel 剧本：第一轮请求调用工具，第二轮返回 `预设的最终回答`。
 
-print(result.final_output)
+#### 本机实际结果
+
+从仓库根目录运行：
+
+```bash
+python3 experiments/tool_error_experiment.py
 ```
 
-这里故意让工具抛出异常。
+| 观察项 | A：默认错误处理 | B：`failure_error_function=None` |
+|---|---|---|
+| 函数入口打印 | 一次，`value=test` | 一次，`value=test` |
+| 工具抛出异常后 | 生成工具错误结果 | 当前 Run 抛出 `UserError` |
+| 模型调用次数 | 2 | 1 |
+| 最终回答 | `预设的最终回答` | 本次没有最终回答 |
 
-那么，整个 Runner 会立即崩溃吗？
+A 组输出的工具结果为：
 
-**不一定。**
-
-SDK 对 FunctionTool 提供了默认的错误处理机制。
-
-源码：
-
-`openai-agents-python/src/agents/tool.py:1833`
-
-```python
-def default_tool_error_function(
-    ctx,
-    error: Exception
-) -> str:
-    return "An error occurred while running the tool."
+```text
+An error occurred while running the tool. Please try again.
 ```
 
-默认情况下，SDK 可以把执行异常转换为一条模型可见的工具错误结果。
+实验还读取了 `model.calls[1].input`，确认第二轮模型输入中确实包含这条工具结果。最终回答由 ScriptedModel 预设，**不能说明真实模型理解了错误或选择了恢复策略**。
 
-模型收到错误信息后，仍可能继续推理并给出答复。
+B 组打印的异常为 `UserError: Error running tool unstable_tool: 模拟数据库故障`。最初业务函数抛的是 `ValueError`；本次经 SDK 外层包装后，实验代码捕获到 `UserError`。实验脚本显式捕获异常并继续打印记录，因此脚本进程退出码为 0，不表示 B 组的 Run 成功。
 
-但是，如果这样声明：
+#### 对照源码解释
 
-```python
-@function_tool(failure_error_function=None)
-def unstable_tool(value: str) -> str:
-    """执行测试操作。"""
-    raise ValueError("模拟数据库故障")
-```
+1. `function_tool` 为业务函数建立执行回调，并保存错误处理配置。
+2. 工具真正执行后发生异常，[`_FailureHandlingFunctionToolInvoker.__call__`](https://github.com/openai/openai-agents-python/blob/17d994bd3045dae71acda676a4ef4762ed8ecd94/src/agents/tool.py#L657) 调用错误处理逻辑。
+3. A 组使用 [`default_tool_error_function`](https://github.com/openai/openai-agents-python/blob/17d994bd3045dae71acda676a4ef4762ed8ecd94/src/agents/tool.py#L1997)，将本次异常转成固定字符串。Runner 收到工具结果后继续下一轮。
+4. B 组的错误处理配置为 `None`，包装层继续抛出异常；[工具执行外层](https://github.com/openai/openai-agents-python/blob/17d994bd3045dae71acda676a4ef4762ed8ecd94/src/agents/run_internal/tool_execution.py#L1861) 将本例的普通异常包装为 `UserError`。
 
-则关闭了该装饰器的默认工具错误转换机制。错误会沿执行链传播，交由上层的工具执行或 Run 错误处理逻辑处理。
-
-可以用：
-
-```python
-try:
-    result = await Runner.run(
-        agent,
-        "调用 unstable_tool"
-    )
-except Exception as exc:
-    print(type(exc).__name__, str(exc))
-```
-
-观察异常类型。
-
-具体异常类型可能经过 SDK 包装，不应该假定最外层一定收到原始 `ValueError`。
-
-这个实验验证了：
-
-**FunctionTool 的执行回调与错误处理是两个不同的职责。工具异常既可以被转换为模型结果，也可以让当前 Run 失败。**
-
-对应执行位置：
-
-`openai-agents-python/src/agents/run_internal/tool_execution.py:1667`
+**结论范围：** 这是一次 `ValueError`、普通函数工具及上述配置的对照。超时、取消、护栏、自定义错误函数和真实模型收到错误后的决策，需要各自验证；不能将本次结果推广到所有错误路径。
 
 ### 8.2 实验二：Agent 无限调用工具怎么办？
 

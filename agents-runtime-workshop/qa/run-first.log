@@ -1,7 +1,0 @@
-locator.waitFor: Timeout 30000ms exceeded.
-Call log:
-  - waiting for getByRole('heading', { name: '一次请求，怎样跑完一个 Agent？' }) to be visible
-
-    at /tmp/agents-runtime-workshop-20261112/qa/browser-check.cjs:123:65 {
-  name: 'TimeoutError'
-}

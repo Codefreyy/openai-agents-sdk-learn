@@ -1,9 +1,0 @@
-{
-  "success": true,
-  "kind": "HTTP mock only",
-  "api_style": "chat_completions",
-  "behavior": "tools",
-  "code_cells": 29,
-  "executed_code_cells": 29,
-  "real_api_requests": 0
-}
