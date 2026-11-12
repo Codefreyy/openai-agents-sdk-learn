@@ -53,10 +53,10 @@ JUPYTER_PATH=/tmp/agents-sdk-full-workshop-20261112/kernel/share/jupyter \
 - 官方 Key 使用参考：https://developers.openai.com/api/docs/quickstart 。模型示例沿用原笔记 gpt-4.1，是否可用以听众账号为准。
 - 本次为本地 Notebook 更新，没有推送 GitHub，也没有重新发布 NoCode 网站的下载快照。
 
-## 后续补充：运行时输入问题
+## 后续补充：运行时隐藏输入 API Key
 
-天气与 Handoff 实验新增 input 输入：开启后填写用户问题，留空使用对应默认示例，再次运行创建独立 Run。Agent 的 Instructions 不随输入修改，不自动保留上次对话。使用说明同步补充准备顺序和输入方式。
+KEY_SOURCE 默认改为 masked_input，沿用 getpass 读取并移除首尾空白。开启真实模型后运行天气或 Handoff 实验，提示输入 OpenAI API Key；无需将 Key 填入代码或预先配置 Colab Secrets。每次运行真实实验重新输入。Secrets 和环境变量仍为可选方式。此前误加的问题输入框已撤回，实验问题恢复为原示例字符串。
 
-验证目录为 /tmp/agents-sdk-prompt-input-20261112，更新后的 Notebook 已同步到该目录，环境与 SDK 基线沿用上文。执行 execute_notebook.py 与 validate_prompt_input.py，退出码均为 0：全文 30 / 30 代码单元通过，已有 14 个接口模拟场景通过。成功路径增加检查，确认两种协议下天气、Handoff 的自定义输入均进入第一次模型请求；关闭分支检查不会读取密钥或请求输入。验证使用模拟输入与 HTTP 接口，没有发起真实模型请求，也没有实测 Colab 输入框界面。
+验证目录为 /tmp/agents-sdk-key-input-20261112，更新后的 Notebook 已同步到该目录，环境与 SDK 基线沿用上文。执行 execute_notebook.py 与 validate_agents_key_input.py，退出码均为 0：全文 30 / 30 代码单元通过，14 个接口模拟场景通过。两种协议的天气、Handoff 和错误处理使用模拟 getpass 输入的假 Key 接入，确认客户端收到对应 Key；默认关闭分支不读取密钥。未使用真实凭据、未发起真实模型请求，未实测 Colab 隐藏输入框界面。
 
-本次证据见 notebook-validation/2026-11-12-prompt-input/。输入框改动尚未推送 GitHub。
+本次证据见 notebook-validation/2026-11-12-key-input/。此节为当时的验证记录；GitHub 当前版本以 main 分支实际内容为准。

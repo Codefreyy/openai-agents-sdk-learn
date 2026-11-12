@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "scenarios": [
+    {
+      "scenario": "default_mode_no_key_or_client",
+      "pass": true
+    },
+    {
+      "scenario": "responses_429_no_retry_or_fallback",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "chat_completions_429_no_retry_or_fallback",
+      "pass": true,
+      "mock_http_requests": 1
+    },
+    {
+      "scenario": "blank_key_no_client_or_request",
+      "pass": true
+    }
+  ],
+  "real_api_requests": 0,
+  "shared_notebook_outputs_empty": true,
+  "credential_prefix_absent": true
+}

@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "kind": "HTTP mock only",
+  "api_style": "responses",
+  "behavior": "tools",
+  "code_cells": 29,
+  "executed_code_cells": 29,
+  "real_api_requests": 0
+}
