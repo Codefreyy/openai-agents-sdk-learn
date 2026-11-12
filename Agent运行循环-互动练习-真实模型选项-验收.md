@@ -52,3 +52,11 @@ JUPYTER_PATH=/tmp/agents-sdk-full-workshop-20261112/kernel/share/jupyter \
 - 未在 Colab 页面操作 Secrets、隐藏输入或实际运行；Cloud IDE 的通过不等于 Colab 页面实测。
 - 官方 Key 使用参考：https://developers.openai.com/api/docs/quickstart 。模型示例沿用原笔记 gpt-4.1，是否可用以听众账号为准。
 - 本次为本地 Notebook 更新，没有推送 GitHub，也没有重新发布 NoCode 网站的下载快照。
+
+## 后续补充：运行时输入问题
+
+天气与 Handoff 实验新增 input 输入：开启后填写用户问题，留空使用对应默认示例，再次运行创建独立 Run。Agent 的 Instructions 不随输入修改，不自动保留上次对话。使用说明同步补充准备顺序和输入方式。
+
+验证目录为 /tmp/agents-sdk-prompt-input-20261112，更新后的 Notebook 已同步到该目录，环境与 SDK 基线沿用上文。执行 execute_notebook.py 与 validate_prompt_input.py，退出码均为 0：全文 30 / 30 代码单元通过，已有 14 个接口模拟场景通过。成功路径增加检查，确认两种协议下天气、Handoff 的自定义输入均进入第一次模型请求；关闭分支检查不会读取密钥或请求输入。验证使用模拟输入与 HTTP 接口，没有发起真实模型请求，也没有实测 Colab 输入框界面。
+
+本次证据见 notebook-validation/2026-11-12-prompt-input/。输入框改动尚未推送 GitHub。

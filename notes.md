@@ -268,6 +268,7 @@ flowchart TD
 
 解析阶段识别出两个工具调用（识别工具调用ID和参数）和模型消息。
 执行阶段负责处理处理 Function Tool 执行、Handoff，以及这些操作产生的副作用和后续控制流。
+
 最后返回结果格式：SingleStepResult（src/agents/run_internal/run_steps.py:192），携带本轮执行产物和next_step交给Runner决定下一步。
 ```python 
 
